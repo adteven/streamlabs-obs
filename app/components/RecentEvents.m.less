@@ -1,10 +1,12 @@
 @import "../styles/index.less";
 
 .container {
-  padding: 0 16px;
-  height: 150px;
-  overflow: none;
+  padding: 0 8px;
+  height: 100%;
   flex-shrink: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .container:global(.perf-mode) {
@@ -29,10 +31,14 @@
 .eventContainer {
   .radius();
 
-  height: calc(100% - 46px);
-  overflow-y: auto;
+  flex-grow: 1;
+  height: 100px;
   position: relative;
   background: var(--section);
+}
+
+.eventContainer.overlay {
+  height: 100%;
 }
 
 .cell {
@@ -41,19 +47,31 @@
   display: flex;
   align-items: center;
   padding: 8px 16px;
+  flex-wrap: wrap;
+  position: relative;
 
   span {
     margin-right: 8px;
     white-space: nowrap;
   }
 
-  i {
-    margin-left: auto;
+  :global(.icon-repeat) {
+    position: absolute;
+    top: 10px;
+    right: 16px;
+  }
+
+  :global(.fab) {
+    opacity: 0.5;
   }
 }
 
 .cell:nth-child(even) {
   background: var(--background);
+}
+
+.cell-read {
+  opacity: 0.6;
 }
 
 .donation {
@@ -75,21 +93,32 @@
 .name {
   color: var(--title);
   font-weight: 500;
+  margin-left: 8px;
 }
 
-.timestamp {
-  opacity: 0.5;
-}
-
-.whisper {
-  font-style: italic;
-  opacity: 0.5;
+.message {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.timestamp {
+  opacity: 0.7;
+}
+
+.whisper {
+  font-style: italic;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal !important;
+}
+
 :global(.action-icon).red {
   color: var(--warning);
+
+  &:hover {
+    color: var(--warning);
+  }
 }
 
 .empty {

@@ -1,35 +1,29 @@
 import Vue from 'vue';
-import TsxComponent from 'components/tsx-component';
+import TsxComponent, { createProps } from 'components/tsx-component';
 import { Component, Prop, Watch } from 'vue-property-decorator';
 import { Inject } from 'services/core/injector';
 import { TwitterService } from 'services/integrations/twitter';
 import HFormGroup from 'components/shared/inputs/HFormGroup.vue';
 import { $t } from 'services/i18n';
 import { shell } from 'electron';
-import { Spinner, TextArea, Button } from 'streamlabs-beaker';
+import { TextArea } from 'streamlabs-beaker';
 import { ToggleInput } from 'components/shared/inputs/inputs';
 import { UserService } from 'services/user';
 
 import cx from 'classnames';
 import styles from './Twitter.m.less';
 
-@Component({})
-export class Twitter extends TsxComponent<{
-  streamTtitle: string;
-  midStreamMode: boolean;
-  updatingInfo: boolean;
-  value: string;
-}> {
+class TwitterProps {
+  streamTitle: string = '';
+  value?: string = '';
+}
+
+@Component({ props: createProps(TwitterProps) })
+export class Twitter extends TsxComponent<TwitterProps> {
   @Inject() twitterService: TwitterService;
   @Inject() userService: UserService;
 
-  @Prop() streamTitle: string;
-  @Prop() midStreamMode: boolean;
-  @Prop() updatingInfo: boolean;
-  @Prop() value: string;
-
   priorTitle: string = '';
-  shouldTweetModel: boolean = this.twitterService.state.tweetWhenGoingLive;
 
   get isTwitch() {
     return this.userService.platform.type === 'twitch';
@@ -63,10 +57,6 @@ export class Twitter extends TsxComponent<{
     return $t('Compose Tweet');
   }
 
-  openPrime() {
-    shell.openExternal('https://streamlabs.com/editor/domain?ref=slobs_twitter&redirect=false');
-  }
-
   linkTwitter() {
     this.twitterService.openLinkTwitterDialog();
   }
@@ -80,7 +70,7 @@ export class Twitter extends TsxComponent<{
     if (!this.csOnboardingComplete && this.isTwitch) {
       url = `https://twitch.tv/${this.userService.platform.username}`;
     }
-    this.onTweetChange(`${this.streamTitle} ${url}`);
+    this.onTweetChange(`${this.props.streamTitle} ${url}`);
   }
 
   async getTwitterStatus() {
@@ -89,7 +79,7 @@ export class Twitter extends TsxComponent<{
 
   async created() {
     await this.getTwitterStatus();
-    this.priorTitle = this.streamTitle;
+    this.priorTitle = this.props.streamTitle;
     this.setInitialTweetBody();
   }
 
@@ -97,17 +87,12 @@ export class Twitter extends TsxComponent<{
     this.onTweetChange(tweet);
   }
 
-  updateShouldTweetModel(shouldTweet: boolean) {
-    this.shouldTweetModel = shouldTweet;
+  updateShouldTweet(shouldTweet: boolean) {
+    this.twitterService.setTweetPreference(shouldTweet);
   }
 
   onTweetChange(tweet: string) {
     this.$emit('input', tweet);
-  }
-
-  @Watch('shouldTweetModel')
-  onShouldTweetChange() {
-    this.twitterService.setTweetPreference(this.shouldTweetModel);
   }
 
   @Watch('siteUrl')
@@ -117,31 +102,19 @@ export class Twitter extends TsxComponent<{
 
   @Watch('streamTitle')
   onTitleUpdate(title: string) {
-    const newTweet = this.value.replace(this.priorTitle, title);
-    if (this.value.indexOf(this.priorTitle) !== -1 && newTweet.length <= 280) {
+    const newTweet = this.props.value.replace(this.priorTitle, title);
+    if (this.props.value.indexOf(this.priorTitle) !== -1 && newTweet.length <= 280) {
       this.onTweetChange(newTweet);
     }
     this.priorTitle = title;
   }
 
-  primeButton(h: Function) {
-    if (!this.isPrime) {
-      return (
-        <a onClick={this.openPrime} class={styles.primeLink}>
-          {$t('Custom URL with')}
-          &nbsp;
-          <strong>{$t('Prime')}</strong>
-        </a>
-      );
-    }
-  }
-
-  tweetInput(h: Function) {
+  get tweetInput() {
     return (
       <TextArea
         name="tweetInput"
         onInput={this.updateTweetModel.bind(this)}
-        value={this.value}
+        value={this.props.value}
         autoResize="true"
         label={this.composeTweetText}
         class={styles.twitterTweetInput}
@@ -153,23 +126,19 @@ export class Twitter extends TsxComponent<{
     );
   }
 
-  unlinkedView(h: Function) {
+  get unlinkedView() {
     return (
       <div class={styles.section}>
         <p class={styles.twitterShareText}>{$t('Share Your Stream')}</p>
         <p>{$t("Tweet to let your followers know you're going live")}</p>
-        <button
-          class="button button--default"
-          disabled={this.updatingInfo}
-          onClick={this.linkTwitter}
-        >
+        <button class="button button--default" onClick={this.linkTwitter}>
           {$t('Connect to Twitter')} <i class="fab fa-twitter" />
         </button>
       </div>
     );
   }
 
-  linkedView(h: Function) {
+  get linkedView() {
     return (
       <div class={cx('section', styles.section)}>
         <p class={styles.twitterShareText}>{$t('Share Your Stream')}</p>
@@ -177,20 +146,18 @@ export class Twitter extends TsxComponent<{
           <div class={styles.twitterToggleBlock}>
             <span>{$t('Enable Tweet Sharing')}</span>
             <ToggleInput
-              onInput={this.updateShouldTweetModel.bind(this)}
-              value={this.shouldTweetModel}
+              onInput={(shouldTweet: boolean) => this.updateShouldTweet(shouldTweet)}
+              value={this.shouldTweet}
               class={styles.twitterTweetToggle}
               metadata={{ title: $t('Tweet when going live') }}
             />
           </div>
           <p>@{this.twitterScreenName}</p>
         </div>
-        {this.tweetInput(h)}
+        {this.tweetInput}
         <div class={styles.twitterButtons}>
-          {this.primeButton(h)}
           <button
             class={cx('button', 'button--default', styles.adjustButton)}
-            disabled={this.updatingInfo}
             onClick={this.unlinkTwitter}
           >
             {$t('Unlink Twitter')}
@@ -200,19 +167,12 @@ export class Twitter extends TsxComponent<{
     );
   }
 
-  twitter(h: Function) {
-    if (!this.updatingInfo && !this.hasTwitter) {
-      return this.unlinkedView(h);
-    }
-
-    if (this.hasTwitter) {
-      return this.linkedView(h);
-    }
+  get twitter() {
+    if (!this.hasTwitter) return this.unlinkedView;
+    if (this.hasTwitter) return this.linkedView;
   }
 
-  render(h: Function) {
-    if (!this.midStreamMode) {
-      return <HFormGroup metadata={{}}>{this.twitter(h)}</HFormGroup>;
-    }
+  render() {
+    return <HFormGroup metadata={{}}>{this.twitter}</HFormGroup>;
   }
 }

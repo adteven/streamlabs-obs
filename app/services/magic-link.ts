@@ -1,8 +1,9 @@
 import { Service } from 'services';
 import { Inject } from 'services/core';
 import { UserService } from 'services/user';
-import { authorizedHeaders, handleResponse } from 'util/requests';
+import { authorizedHeaders, jfetch } from 'util/requests';
 import { HostsService } from './hosts';
+import electron from 'electron';
 
 interface ILoginTokenResponse {
   login_token: string;
@@ -13,10 +14,12 @@ export class MagicLinkService extends Service {
   @Inject() userService: UserService;
   @Inject() hostsService: HostsService;
 
-  async getDashboardMagicLink() {
+  async getDashboardMagicLink(subPage = '', source?: string) {
     const token = (await this.fetchNewToken()).login_token;
-
-    return `https://${this.hostsService.streamlabs}/slobs/magic/dashboard?login_token=${token}`;
+    const sourceString = source ? `&refl=${source}` : '';
+    return `https://${this.hostsService.streamlabs}/slobs/magic/dashboard?login_token=${token}&r=${
+      subPage ?? ''
+    }${sourceString}`;
   }
 
   private fetchNewToken(): Promise<ILoginTokenResponse> {
@@ -26,6 +29,28 @@ export class MagicLinkService extends Service {
       { headers },
     );
 
-    return fetch(request).then(handleResponse);
+    return jfetch(request);
+  }
+
+  /**
+   * open the prime onboarding in the browser
+   * @param refl a referral tag for analytics
+   */
+  async linkToPrime(refl: string) {
+    try {
+      const link = await this.getDashboardMagicLink('prime', refl);
+      electron.remote.shell.openExternal(link);
+    } catch (e: unknown) {
+      console.error('Error generating dashboard magic link', e);
+    }
+  }
+
+  async openWidgetThemesMagicLink() {
+    try {
+      const link = await this.getDashboardMagicLink('widgetthemes');
+      electron.remote.shell.openExternal(link);
+    } catch (e: unknown) {
+      console.error('Error generating dashboard magic link', e);
+    }
   }
 }

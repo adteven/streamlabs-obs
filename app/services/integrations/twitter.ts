@@ -1,16 +1,14 @@
-import Vue from 'vue';
 import URI from 'urijs';
 import { PersistentStatefulService } from 'services/core/persistent-stateful-service';
 import { Inject } from 'services/core/injector';
-import { handleResponse, authorizedHeaders } from 'util/requests';
-import { mutation } from 'services/core/stateful-service';
-import { Service } from 'services/core';
+import { authorizedHeaders, jfetch } from 'util/requests';
+import { mutation, ViewHandler } from 'services/core/stateful-service';
 import electron from 'electron';
 import { HostsService } from 'services/hosts';
-import Util from 'services/utils';
 import { UserService } from 'services/user';
 import { $t, I18nService } from 'services/i18n';
 import uuid from 'uuid/v4';
+import { throwStreamError } from '../streaming/stream-error';
 
 interface ITwitterServiceState {
   linked: boolean;
@@ -34,7 +32,6 @@ export class TwitterService extends PersistentStatefulService<ITwitterServiceSta
   @Inject() private userService: UserService;
   @Inject() i18nService: I18nService;
 
-  apiToken = this.userService.state.auth.apiToken;
   authWindowOpen = false;
 
   static defaultState: ITwitterServiceState = {
@@ -43,14 +40,22 @@ export class TwitterService extends PersistentStatefulService<ITwitterServiceSta
     creatorSiteOnboardingComplete: false,
     creatorSiteUrl: '',
     screenName: '',
-    tweetWhenGoingLive: true,
+    tweetWhenGoingLive: false,
   };
+
+  init() {
+    super.init();
+    this.userService.userLogout.subscribe(() => this.RESET_TWITTER_STATUS());
+  }
+
+  get views() {
+    return new TwitterView(this.state);
+  }
 
   @mutation()
   SET_TWITTER_STATUS(status: ITwitterStatusResponse) {
     this.state.linked = status.linked;
     this.state.prime = status.prime;
-    this.state.creatorSiteOnboardingComplete = status.cs_onboarding_complete;
     this.state.creatorSiteUrl = status.cs_url;
     this.state.screenName = status.screen_name;
   }
@@ -60,54 +65,75 @@ export class TwitterService extends PersistentStatefulService<ITwitterServiceSta
     this.state.tweetWhenGoingLive = preference;
   }
 
+  @mutation()
+  SET_STREAMLABS_URL(value: boolean) {
+    this.state.creatorSiteOnboardingComplete = value;
+  }
+
+  @mutation()
+  RESET_TWITTER_STATUS() {
+    this.state.linked = false;
+    this.state.prime = false;
+    this.state.creatorSiteOnboardingComplete = false;
+    this.state.creatorSiteUrl = '';
+    this.state.screenName = '';
+    this.state.tweetWhenGoingLive = false;
+  }
+
   setTweetPreference(preference: boolean) {
     this.SET_TWEET_PREFERENCE(preference);
   }
 
   private linkTwitterUrl() {
-    const host = Util.isPreview() ? this.hostsService.beta3 : this.hostsService.streamlabs;
-    const token = this.apiToken;
+    const token = this.userService.apiToken;
     const locale = this.i18nService.state.locale;
 
-    return `https://${host}/slobs/twitter/link?oauth_token=${token}&l=${locale}`;
+    return `https://${this.hostsService.streamlabs}/slobs/twitter/link?oauth_token=${token}&l=${locale}`;
   }
 
   async getTwitterStatus() {
     const response = await this.fetchTwitterStatus();
-    this.SET_TWITTER_STATUS(response);
+    if (response) this.SET_TWITTER_STATUS(response);
   }
 
   async unlinkTwitter() {
+    this.RESET_TWITTER_STATUS();
     const host = this.hostsService.streamlabs;
     const url = `https://${host}/api/v5/slobs/twitter/unlink`;
-    const headers = authorizedHeaders(this.apiToken);
+    const headers = authorizedHeaders(this.userService.apiToken);
     const request = new Request(url, { headers });
-    return fetch(request)
-      .then(handleResponse)
-      .catch(() => null);
+    return jfetch(request).catch(() => {
+      console.warn('Error unlinking Twitter');
+    });
+  }
+
+  setStreamlabsUrl(value: boolean) {
+    this.SET_STREAMLABS_URL(value);
   }
 
   async fetchTwitterStatus() {
     const host = this.hostsService.streamlabs;
     const url = `https://${host}/api/v5/slobs/twitter/status`;
-    const headers = authorizedHeaders(this.apiToken);
+    const headers = authorizedHeaders(this.userService.apiToken);
     const request = new Request(url, { headers });
-    return fetch(request)
-      .then(handleResponse)
-      .catch(() => null);
+    return jfetch<ITwitterStatusResponse>(request).catch(() => {
+      console.warn('Error fetching Twitter status');
+    });
   }
 
   async postTweet(tweet: string) {
     const host = this.hostsService.streamlabs;
     const url = `https://${host}/api/v5/slobs/twitter/tweet`;
-    const headers = authorizedHeaders(this.apiToken);
+    const headers = authorizedHeaders(this.userService.apiToken);
     headers.append('Content-Type', 'application/json');
     const request = new Request(url, {
       headers,
       method: 'POST',
       body: JSON.stringify({ tweet }),
     });
-    return fetch(request).then(handleResponse);
+    return jfetch(request).catch(e =>
+      throwStreamError('TWEET_FAILED', e, e.result?.error || $t('Could not connect to Twitter')),
+    );
   }
 
   openLinkTwitterDialog() {
@@ -160,5 +186,19 @@ export class TwitterService extends PersistentStatefulService<ITwitterServiceSta
     }
 
     return false;
+  }
+}
+
+export class TwitterView extends ViewHandler<ITwitterServiceState> {
+  get userView() {
+    return this.getServiceViews(UserService);
+  }
+
+  get url() {
+    let url = `${this.state.creatorSiteUrl}/home`;
+    if (!this.state.creatorSiteOnboardingComplete && this.userView.platform.type === 'twitch') {
+      url = `https://twitch.tv/${this.userView.platform.username}`;
+    }
+    return url;
   }
 }

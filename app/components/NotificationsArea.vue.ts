@@ -1,8 +1,14 @@
 import Vue from 'vue';
 import moment from 'moment';
 import { Component } from 'vue-property-decorator';
+import cloneDeep from 'lodash/cloneDeep';
 import { Inject } from 'services/core/injector';
-import { ENotificationType, NotificationsService, INotification } from 'services/notifications';
+import {
+  ENotificationType,
+  NotificationsService,
+  INotification,
+  ENotificationSubType,
+} from 'services/notifications';
 import { $t } from 'services/i18n';
 const notificationAudio = require('../../media/sound/ding.wav');
 const QUEUE_TIME = 5000;
@@ -35,6 +41,11 @@ export default class NotificationsArea extends Vue {
   mounted() {
     this.notifyAudio = new Audio(notificationAudio);
 
+    if (this.notificationsService.state.notifications) {
+      this.notificationQueue = cloneDeep(this.notificationsService.state.notifications);
+      this.checkQueue();
+    }
+
     this.notificationsService.notificationPushed.subscribe(notify => {
       this.onNotificationHandler(notify);
     });
@@ -50,10 +61,6 @@ export default class NotificationsArea extends Vue {
 
       this.showExtendedNotifications = this.$refs.notificationsContainer.offsetWidth >= 150;
     }, 1000);
-
-    if (this.notificationsService.state.notifications.length) {
-      this.notificationsService.state.notifications.forEach(this.onNotificationHandler);
-    }
   }
 
   destroyed() {
@@ -62,7 +69,7 @@ export default class NotificationsArea extends Vue {
   }
 
   get unreadCount() {
-    return this.notificationsService.getUnread(ENotificationType.WARNING).length;
+    return this.notificationsService.views.getUnread(ENotificationType.WARNING).length;
   }
 
   get settings() {
@@ -121,6 +128,15 @@ export default class NotificationsArea extends Vue {
   }
 
   private onNotificationHandler(notify: INotification) {
+    if (
+      [
+        ENotificationSubType.DROPPED,
+        ENotificationSubType.LAGGED,
+        ENotificationSubType.SKIPPED,
+      ].includes(notify.subType)
+    ) {
+      return;
+    }
     this.notificationQueue.push(notify);
     if (this.canShowNextNotify) this.checkQueue();
   }
@@ -139,7 +155,8 @@ export default class NotificationsArea extends Vue {
 
   private hideOutdated() {
     this.notifications.forEach(uiNotify => {
-      const notify = this.notificationsService.getNotification(uiNotify.id);
+      const notify = this.notificationsService.views.getNotification(uiNotify.id);
+      if (!notify) return;
       const now = Date.now();
       if (!notify.unread || (notify.lifeTime !== -1 && now - notify.date > notify.lifeTime)) {
         uiNotify.outdated = true;
