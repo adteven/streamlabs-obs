@@ -1,28 +1,29 @@
-import { useSpectron, test, focusChild, TExecutionContext } from '../../helpers/spectron';
-import { getClient } from '../../helpers/api-client';
+import { useWebdriver, test, TExecutionContext } from '../../helpers/webdriver';
+import { getApiClient } from '../../helpers/api-client';
 import { makeScreenshots, useScreentest } from '../screenshoter';
 import { ScenesService } from 'services/api/external-api/scenes';
 import { TransitionsService } from 'services/transitions';
+import { focusChild } from '../../helpers/modules/core';
 
-useSpectron({ restartAppAfterEachTest: false });
+useWebdriver({ restartAppAfterEachTest: false });
 useScreentest();
 
 test('Transitions', async (t: TExecutionContext) => {
-  const client = await getClient();
+  const client = await getApiClient();
   const scenesService = client.getResource<ScenesService>('ScenesService');
   const transitionService = client.getResource<TransitionsService>('TransitionsService');
 
   transitionService.showSceneTransitions();
-  await focusChild(t);
+  await focusChild();
   await makeScreenshots(t, 'No scenes');
   scenesService.createScene('New Scene');
   await makeScreenshots(t, '1 scene');
-  await t.context.app.client.click('button=Add Transition');
+  await (await t.context.app.client.$('button=Add Transition')).click();
   await makeScreenshots(t, 'Add new');
-  await t.context.app.client.click('button=Done');
-  await t.context.app.client.click('button=Connections');
+  await (await t.context.app.client.$('button=Done')).click();
+  await (await t.context.app.client.$('button=Connections')).click();
   await makeScreenshots(t, 'Connections');
-  await t.context.app.client.click('button=Add Connection');
+  await (await t.context.app.client.$('button=Add Connection')).click();
   await makeScreenshots(t, 'Add connection');
   t.pass();
 });

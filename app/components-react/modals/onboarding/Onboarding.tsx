@@ -1,0 +1,295 @@
+import React, { useCallback, useState, useEffect } from 'react';
+import { Button, Modal } from 'antd';
+import * as remote from '@electron/remote';
+import * as steps from './steps';
+import { EOnboardingSteps } from 'services/onboarding/onboarding-v2';
+import { Services } from 'components-react/service-provider';
+import { useRealmObject, useRealmObjectProperty } from 'components-react/hooks/realm';
+import { useVuex } from 'components-react/hooks';
+import { $t } from 'services/i18n';
+import { alertAsync } from 'components-react/modals';
+import {
+  EPlatformCallResult,
+  externalAuthPlatforms,
+  canBePrimaryPlatform,
+  TPlatform,
+} from 'services/platforms';
+import UltraIcon from 'components-react/shared/UltraIcon';
+import KevinSvg from 'components-react/shared/KevinSvg';
+import styles from './Common.m.less';
+import { $i } from 'services/utils';
+
+const NO_BUTTON_STEPS = new Set([EOnboardingSteps.Splash, EOnboardingSteps.Login]);
+
+export interface IOnboardingStepProps {
+  processing: boolean;
+  setProcessing: (val: boolean) => void;
+}
+
+const STEPS_MAP = {
+  [EOnboardingSteps.Splash]: steps.Splash,
+  [EOnboardingSteps.Login]: steps.Login,
+  [EOnboardingSteps.RecordingLogin]: steps.RecordingLogin,
+  [EOnboardingSteps.ConnectMore]: steps.ConnectMore,
+  [EOnboardingSteps.Devices]: steps.Devices,
+  [EOnboardingSteps.OBSImport]: steps.OBSImport,
+  [EOnboardingSteps.Ultra]: steps.Ultra,
+  [EOnboardingSteps.Themes]: steps.Themes,
+};
+
+export default function Onboarding() {
+  const { OnboardingV2Service, UserService } = Services;
+
+  const [processing, setProcessing] = useState(false);
+
+  // Avoid re-rendering the entire onboarding modal when `showOnboarding` changes
+  // by getting the `currentStep` separately
+  const currentStep = useRealmObjectProperty(OnboardingV2Service.state.currentStep);
+  const { currentIndex, showOnboarding } = useRealmObject(OnboardingV2Service.state);
+  const { isPartialSLAuth } = useVuex(() => ({
+    isPartialSLAuth: !!UserService.views.isPartialSLAuth,
+  }));
+
+  useEffect(() => {
+    OnboardingV2Service.actions.showOnboardingIfNecessary();
+  }, []);
+
+  function closeModal() {
+    if (processing) return;
+    OnboardingV2Service.actions.closeOnboarding();
+  }
+
+  function cont() {
+    if (processing) return;
+    OnboardingV2Service.actions.continueStep();
+  }
+
+  function takeStep(skipped?: boolean) {
+    if (processing) return;
+    OnboardingV2Service.actions.takeStep(skipped);
+  }
+
+  function stepBack() {
+    if (processing) return;
+    OnboardingV2Service.actions.stepBack();
+  }
+
+  if (!currentStep || !showOnboarding) return <></>;
+
+  const Component = STEPS_MAP[currentStep.name];
+  const continueTexts: PartialRec<EOnboardingSteps, string> = {
+    [EOnboardingSteps.ConnectMore]: isPartialSLAuth ? $t('Switch Account') : $t('Continue'),
+    [EOnboardingSteps.Ultra]: $t('Continue with Free'),
+    [EOnboardingSteps.Themes]: $t('Finish'),
+  };
+  const continueText = continueTexts[currentStep.name] || $t('Continue');
+
+  return (
+    <Modal
+      closable={false}
+      keyboard={false}
+      maskClosable={false}
+      onCancel={closeModal}
+      destroyOnClose
+      centered
+      bodyStyle={{ padding: 32, height: '100%' }}
+      className={styles.modalWrapper}
+      visible={showOnboarding}
+      getContainer={false}
+      footer={
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          {currentIndex !== 0 && (
+            <Button onClick={stepBack} type="link">
+              {$t('Back')}
+            </Button>
+          )}
+          <div style={{ display: 'flex', marginLeft: 'auto' }}>
+            {currentStep.isSkippable && (
+              <Button type="link" onClick={() => takeStep(true)}>
+                {$t('Skip')}
+              </Button>
+            )}
+            {!NO_BUTTON_STEPS.has(currentStep.name) && (
+              <Button type="primary" onClick={cont}>
+                {continueText}
+              </Button>
+            )}
+          </div>
+        </div>
+      }
+    >
+      <Component processing={processing} setProcessing={setProcessing} />
+    </Modal>
+  );
+}
+
+export function Header(p: { title: string; description?: string }) {
+  return (
+    <div className={styles.header}>
+      <div className={styles.kevinBox}>
+        <KevinSvg style={{ height: 32, width: 36, fill: 'var(--background)' }} />
+      </div>
+      <h1 style={{ marginBottom: !p.description ? 16 : undefined }}>{p.title}</h1>
+      {p.description && <span>{p.description}</span>}
+    </div>
+  );
+}
+
+export function ImageCard(p: {
+  metadata: { img: string; title: string; description: string; isUltra?: boolean; count?: number };
+}) {
+  return (
+    <div
+      style={{
+        textAlign: 'left',
+        padding: 16,
+        maxWidth: `${Math.floor(900 / (p.metadata.count || 3))}px`,
+      }}
+    >
+      <img style={{ width: '100%', height: 'auto', marginBottom: 16 }} src={p.metadata.img} />
+      <h4>
+        {p.metadata.isUltra && <UltraIcon style={{ marginRight: 4 }} />}
+        {p.metadata.title}
+      </h4>
+      <span style={{ width: '100%' }}>{p.metadata.description}</span>
+    </div>
+  );
+}
+
+export function DancingKevins() {
+  const url = $i('webm/kevin_jump.webm');
+
+  return (
+    <div className={styles.dancingKevins}>
+      <video src={url} controls={false} autoPlay loop />
+      <video src={`${url}#t=1`} controls={false} autoPlay loop />
+      <video src={`${url}#t=2`} controls={false} autoPlay loop />
+    </div>
+  );
+}
+
+function showTwitchTwoFactorDialog() {
+  remote.dialog
+    .showMessageBox({
+      type: 'error',
+      message: $t(
+        'Twitch requires two factor authentication to be enabled on your account in order to stream to Twitch. Please enable two factor authentication and try again.',
+      ),
+      title: $t('Twitch Authentication Error'),
+      buttons: [$t('Enable Two Factor Authentication'), $t('Dismiss')],
+    })
+    .then(({ response }) => {
+      if (response === 0) {
+        remote.shell.openExternal('https://twitch.tv/settings/security');
+      }
+    });
+}
+
+export function useAuth() {
+  const { UsageStatisticsService, OnboardingV2Service, UserService } = Services;
+
+  /**
+   * An SLID auth is only partial (no primary platform, not validated) until
+   * `finishSLAuth` runs. That is what runs the full login and emits
+   * `userLoginFinished`, so it must happen before the flow continues.
+   *
+   * The outcome is computed in the worker: this window's copy of the user state can lag
+   * behind the worker's, so `UserService.views` must not be read to decide what happens next.
+   * @returns whether the user is now fully logged in
+   */
+  const handleSLIDFinish = useCallback(
+    async ({ result, loggedIn }: { result?: EPlatformCallResult; loggedIn: boolean }) => {
+      if (result === EPlatformCallResult.TwitchTwoFactor) {
+        showTwitchTwoFactorDialog();
+        return false;
+      }
+
+      if (result === EPlatformCallResult.TwitchScopeMissing) {
+        await remote.dialog.showMessageBox(remote.getCurrentWindow(), {
+          type: 'warning',
+          message: $t(
+            'Streamlabs requires additional permissions from your Twitch account. Please log in with Twitch to continue.',
+          ),
+          title: $t('Twitch Authentication Error'),
+          buttons: [$t('Refresh Login')],
+        });
+
+        // Initiate a Twitch merge to get permissions
+        await UserService.actions.return.startAuth('twitch', 'external', true);
+      }
+
+      return loggedIn;
+    },
+    [],
+  );
+
+  const SLIDLogin = useCallback(async () => {
+    UsageStatisticsService.actions.recordAnalyticsEvent('PlatformLogin', 'streamlabs');
+    const status: EPlatformCallResult = await UserService.actions.return.startSLAuth();
+    if (status !== EPlatformCallResult.Success) return;
+
+    // With at least one linked streaming platform we can complete the login right away.
+    // Otherwise the ConnectMore step prompts for a platform and completes it.
+    const response = await UserService.actions.return.finishSLAuthWithLinkedPlatform();
+    if (response.primaryPlatform && !(await handleSLIDFinish(response))) return;
+
+    OnboardingV2Service.actions.takeStep();
+  }, []);
+
+  const platformLogin = useCallback(
+    async (platform: TPlatform, merge = false): Promise<boolean> => {
+      UsageStatisticsService.actions.recordAnalyticsEvent('PlatformLogin', platform);
+      try {
+        const result = await UserService.actions.return.startAuth(
+          platform,
+          externalAuthPlatforms.includes(platform) ? 'external' : 'internal',
+          merge,
+        );
+
+        if (result === EPlatformCallResult.TwitchTwoFactor) {
+          showTwitchTwoFactorDialog();
+          return false;
+        }
+
+        if (result === EPlatformCallResult.Error) {
+          alertAsync(
+            $t(
+              'This account is already linked to another Streamlabs Account. Please use a different account.',
+            ),
+          );
+          return false;
+        }
+
+        // A non-merge login resolves with `undefined` on success, so only bail on
+        // results that explicitly report a problem (e.g. missing Twitch scope)
+        if (result !== undefined && result !== EPlatformCallResult.Success) {
+          throw new Error('Unknown platform login result: ' + result);
+        }
+
+        // Merging a streaming platform into a partial SLID auth gives it its first platform,
+        // which lets us complete the login. Platforms like Patreon can't be a primary platform,
+        // so those are linked but the user still needs to connect a streaming one.
+        if (merge && canBePrimaryPlatform(platform)) {
+          const response = await UserService.actions.return.finishSLAuthWithPlatform(platform);
+          if (!(await handleSLIDFinish(response))) {
+            // Two factor failures have already been reported to the user
+            if (response.result === EPlatformCallResult.TwitchTwoFactor) return false;
+            throw new Error('Failed to finish SLID login after merging platform');
+          }
+        }
+      } catch (err: unknown) {
+        console.error('Error during platform login:', err);
+        alertAsync($t('Something went wrong while logging in. Please try again.'));
+        return false;
+      }
+
+      // Merge complete, or a non-merge login with no issues, so we can continue the flow.
+      return true;
+    },
+    [],
+  );
+
+  const mergePlatform = useCallback((platform: TPlatform) => platformLogin(platform, true), []);
+
+  return { SLIDLogin, platformLogin, mergePlatform };
+}

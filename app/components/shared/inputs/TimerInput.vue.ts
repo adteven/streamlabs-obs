@@ -1,8 +1,9 @@
 import { Component, Prop } from 'vue-property-decorator';
 import { BaseInput } from './BaseInput';
 import { ITimerMetadata } from './index';
+import Scrollable from 'components/shared/Scrollable';
 
-@Component({})
+@Component({ components: { Scrollable } })
 export default class TimerInput extends BaseInput<number, ITimerMetadata> {
   @Prop() value: number;
   @Prop() title: string;
@@ -62,21 +63,21 @@ export default class TimerInput extends BaseInput<number, ITimerMetadata> {
     return second === currentSecond;
   }
 
-  setHour(val: number) {
+  setHour(val: string) {
     const currentMinsInSecs = Math.floor(this.value % 3600);
-    const hour = val * 3600;
+    const hour = parseInt(val, 10) * 3600;
     this.updateValue(currentMinsInSecs + hour);
   }
 
-  setMinute(val: number) {
+  setMinute(val: string) {
     const currentHrsInSecs = Math.floor(this.value / 3600) * 3600;
-    const minute = val * 60;
+    const minute = parseInt(val, 10) * 60;
     this.updateValue(currentHrsInSecs + minute);
   }
 
-  setSecond(val: number) {
+  setSecond(val: string) {
     const currentMinsInSecs = Math.floor((this.value % 3600) / 60) * 60;
-    this.updateValue(currentMinsInSecs + val);
+    this.updateValue(currentMinsInSecs + parseInt(val, 10));
   }
 
   updateValue(value: number) {
@@ -112,8 +113,9 @@ export default class TimerInput extends BaseInput<number, ITimerMetadata> {
   beginHold(callback: Function, param: any) {
     callback(param);
     this.holdTimeout = window.setTimeout(() => {
-      // tslint:disable-next-line:ter-prefer-arrow-callback TODO
-      this.holdInterval = window.setInterval(function() {
+      // function level scope is important for proper debounce functionality
+      // es-lint-disable-next-line prefer-arrow-callback
+      this.holdInterval = window.setInterval(() => {
         callback(param);
       }, 100);
     }, 500);

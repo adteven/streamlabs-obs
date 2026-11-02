@@ -3,8 +3,10 @@ import { IObsListOption, TObsFormData } from 'components/obs/inputs/ObsInput';
 import { WidgetType } from 'services/widgets';
 import { Observable } from 'rxjs';
 import { IAudioSource } from 'services/audio';
+import { EDeinterlaceFieldOrder, EDeinterlaceMode } from 'obs-studio-node';
+import { TDisplayType } from 'services/settings-v2';
 
-export interface ISource extends IResource {
+export interface ISource {
   sourceId: string;
   name: string;
   type: TSourceType;
@@ -15,8 +17,28 @@ export interface ISource extends IResource {
   width: number;
   height: number;
   doNotDuplicate: boolean;
+  configurable: boolean;
+  forceUiRefresh: boolean;
   propertiesManagerType: TPropertiesManager;
+  propertiesManagerSettings?: Dictionary<any>;
   channel?: number;
+  /**
+   * When set to true, all scene items referencing this source
+   * will automatically be hidden, regardless of whether they
+   * are set to visible in the UI.
+   *
+   * This is mainly meant to support Guest Cam
+   */
+  forceHidden: boolean;
+  /**
+   * When set to true, this source will not ouptut any audio,
+   * irrespective of what the user-set muted option displays.
+   *
+   * This is mainly meant to support Guest Cam
+   */
+  forceMuted: boolean;
+  deinterlaceMode?: EDeinterlaceMode;
+  deinterlaceFieldOrder?: EDeinterlaceFieldOrder;
 }
 
 /**
@@ -58,14 +80,14 @@ export interface ISourcesServiceApi {
   getAvailableSourcesTypes(): TSourceType[];
   getAvailableSourcesTypesList(): IObsListOption<TSourceType>[];
   getSources(): ISourceApi[];
-  getSource(sourceId: string): ISourceApi;
-  getSourcesByName(name: string): ISourceApi[];
+  getSource(sourceId: string): ISourceApi | null;
+  getSourcesByName(name: string): (ISourceApi | null)[];
 
   /**
    * creates a source from a file
    * source type depends on the file extension
    */
-  addFile(path: string): ISourceApi;
+  addFile(path: string): ISourceApi | null;
   suggestName(name: string): string;
   showSourceProperties(sourceId: string): void;
   showShowcase(): void;
@@ -82,6 +104,10 @@ export interface ISourceAddOptions<TPropertiesManagerSettings = Dictionary<any>>
   propertiesManagerSettings?: TPropertiesManagerSettings;
   audioSettings?: Partial<IAudioSource>;
   isTemporary?: boolean;
+  guestCamStreamId?: string; // Automatically assign a guest to this source after creation
+  deinterlaceMode?: EDeinterlaceMode;
+  deinterlaceFieldOrder?: EDeinterlaceFieldOrder;
+  display?: TDisplayType;
 }
 
 export type TSourceType =
@@ -102,12 +128,33 @@ export type TSourceType =
   | 'scene'
   | 'ndi_source'
   | 'openvr_capture'
+  | 'screen_capture'
+  | 'mac_screen_capture'
   | 'liv_capture'
   | 'ovrstream_dc_source'
-  | 'vlc_source';
+  | 'vlc_source'
+  | 'coreaudio_input_capture'
+  | 'coreaudio_output_capture'
+  | 'av_capture_input'
+  | 'macos_avcapture'
+  | 'display_capture'
+  | 'audio_line'
+  | 'syphon-input'
+  | 'soundtrack_source'
+  | 'mediasoupconnector'
+  | 'wasapi_process_output_capture'
+  | 'smart_browser_source'
+  | 'spout_capture';
 
 // Register new properties managers here
-export type TPropertiesManager = 'default' | 'widget' | 'streamlabels' | 'platformApp' | 'replay';
+export type TPropertiesManager =
+  | 'default'
+  | 'widget'
+  | 'streamlabels'
+  | 'platformApp'
+  | 'replay'
+  | 'iconLibrary'
+  | 'smartBrowserSource';
 
 export interface ISourcesState {
   sources: Dictionary<ISource>;
@@ -124,4 +171,10 @@ export interface ISourceDisplayData {
   description: string;
   demoFilename?: string;
   supportList?: string[];
+  demoVideo?: boolean;
+  icon: string;
+  shortDesc?: string;
+  link?: string;
+  linkText?: string;
+  group: string;
 }

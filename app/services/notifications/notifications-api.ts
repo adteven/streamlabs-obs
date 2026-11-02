@@ -9,7 +9,17 @@ export enum ENotificationType {
   SUCCESS = 'SUCCESS',
 }
 
-export interface INotificationsSettings {
+export enum ENotificationSubType {
+  DEFAULT = 'DEFAULT',
+  DISCONNECTED = 'DISCONNECTED',
+  DROPPED = 'DROPPED',
+  LAGGED = 'LAGGED',
+  SKIPPED = 'SKIPPED',
+  NEWS = 'NEWS',
+  CPU = 'CPU',
+}
+
+export interface INotificationsSettings extends Dictionary<boolean> {
   enabled: boolean;
   playSound: boolean;
 }
@@ -22,6 +32,8 @@ export interface INotificationOptions {
   action?: IJsonRpcRequest;
   playSound?: boolean;
   data?: any;
+  subType?: ENotificationSubType;
+  singleton?: boolean;
 
   /** The notification's life time in ms. Use -1 for infinity */
   lifeTime?: number;
@@ -37,22 +49,27 @@ export interface INotification extends INotificationOptions {
   playSound: boolean;
   lifeTime: number;
   showTime: boolean;
+  subType: ENotificationSubType;
 }
 
 export interface INotificationsServiceApi {
   notificationPushed: Observable<INotification>;
   notificationRead: Observable<number[]>;
   push(notifyInfo: INotificationOptions): INotification;
-  getNotification(id: number): INotification;
-  getAll(type?: ENotificationType): INotification[];
-  getUnread(type?: ENotificationType): INotification[];
-  getRead(type?: ENotificationType): INotification[];
-  getSettings(): INotificationsSettings;
-  getSettingsFormData(): TObsFormData;
+
+  views: {
+    getNotification(id: number): INotification;
+    getAll(type?: ENotificationType): INotification[];
+    getUnread(type?: ENotificationType): INotification[];
+    getRead(type?: ENotificationType): INotification[];
+    getSettings(): INotificationsSettings;
+  };
+
   setSettings(patch: Partial<INotificationsSettings>): void;
   restoreDefaultSettings(): void;
   markAsRead(id: number): void;
   markAllAsRead(): void;
+  removeByCode(code: string): void;
   applyAction(notificationId: number): void;
   showNotifications(): void;
 }

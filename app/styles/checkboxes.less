@@ -12,7 +12,6 @@
   .margin-bottom();
 
   label {
-    .transition();
     .weight(@normal);
 
     margin: 0;
@@ -39,7 +38,7 @@
       transition: border 0.1s ease, opacity 0.1s ease, box-shadow 0.1s ease, -webkit-transform 0.1s ease;
       transition: border 0.1s ease, opacity 0.1s ease, transform 0.1s ease, box-shadow 0.1s ease;
       transition: border 0.1s ease, opacity 0.1s ease, transform 0.1s ease, box-shadow 0.1s ease, -webkit-transform 0.1s ease;
-      border: 1px solid var(--input-border);
+      border: 1px solid var(--button);
     }
   }
 
@@ -51,7 +50,7 @@
     left: 0;
     opacity: 0 !important;
     outline: 0;
-    z-index: 3;
+    z-index: @z-raised-3;
     width: 20px;
     height: 20px;
     margin: 0;
@@ -71,7 +70,7 @@
     left: 3px;
     top: 0;
     opacity: 1;
-    color: var(--white);
+    color: var(--action-button-text);
     font-family: 'Font Awesome 5 Free', sans-serif;
     font-weight: 900;
     content: '\f00c';

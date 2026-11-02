@@ -1,0 +1,473 @@
+import { RealmObject } from 'services/realm';
+import { ObjectSchema } from 'realm';
+import * as remote from '@electron/remote';
+import { Inject, Service } from 'services/core';
+import {
+  AppService,
+  ObsImporterService,
+  RecordingModeService,
+  SceneCollectionsService,
+  UsageStatisticsService,
+  UserService,
+  WindowsService,
+} from 'app-services';
+import Utils from '../utils';
+
+export enum EOnboardingSteps {
+  Splash = 'Splash',
+  Login = 'Login',
+  RecordingLogin = 'RecordingLogin',
+  ConnectMore = 'ConnectMore',
+  OBSImport = 'OBSImport',
+  Ultra = 'Ultra',
+  Devices = 'Devices',
+  Themes = 'Themes',
+}
+
+interface IOnboardingStep {
+  name: EOnboardingSteps;
+  isSkippable?: boolean;
+  isClosable?: boolean;
+}
+
+interface IOnboardingInitialization {
+  startingStep: IOnboardingStep;
+  isSingleton?: boolean;
+}
+
+type TNavigationModifier =
+  | 'recordingMode'
+  | 'loggedIn'
+  | 'isPartialSLAuth'
+  | 'isUltra'
+  | 'obsInstalled'
+  | 'lessThanTwoPlatforms'
+  | 'hasSceneCollections';
+type TModifiers = Record<TNavigationModifier, boolean>;
+
+type TOnboardingNavigationEvent = 'skip' | 'continue' | 'backtrack' | 'completed' | 'closed';
+type TOnboardingInteractionEvent = 'connectPlatform' | 'installTheme' | 'browseThemes';
+
+class OnboardingStep {
+  config: IOnboardingStep;
+  next: OnboardingStep | null = null;
+  prev: OnboardingStep | null = null;
+
+  constructor(config: IOnboardingStep) {
+    this.config = config;
+  }
+}
+
+class OnboardingPath {
+  private head: OnboardingStep | null = null;
+  private current: OnboardingStep | null = null;
+  private size = 0;
+  private currentIndex = 0;
+  private singletonPath = false;
+
+  constructor(singletonPath?: boolean) {
+    this.singletonPath = singletonPath;
+  }
+
+  // Extracted to getters to prevent external mutation
+  get length() {
+    return this.size;
+  }
+
+  get index() {
+    return this.currentIndex;
+  }
+
+  get prevStepName() {
+    return this.current.prev?.config.name;
+  }
+
+  get nextStepName() {
+    return this.current.next?.config.name;
+  }
+
+  // Adds a node to the end of the list
+  append(config: IOnboardingStep) {
+    const step = new OnboardingStep({ isSkippable: true, isClosable: true, ...config });
+    if (!this.head) {
+      this.head = step;
+      this.current = step;
+    } else {
+      const lastStep = this.getFinalNode(this.head);
+      lastStep.next = step;
+      step.prev = lastStep;
+    }
+    this.size += 1;
+  }
+
+  // Returns false if at end of list, marking the end of the flow and no more steps
+  takeNextStep(modifiers?: Record<TNavigationModifier, boolean>) {
+    const nextStep = this.determineNextStep(modifiers);
+    if (nextStep) this.append(nextStep);
+    if (!this.current.next) return false;
+    this.current = this.current.next;
+    this.currentIndex += 1;
+    return this.current.config;
+  }
+
+  // Returns false if at beginning of list and cannot go back further
+  takePrevStep() {
+    if (!this.current.prev) return false;
+    this.current = this.current.prev;
+    // Backtracking means we don't know what state they'll be in until they take another step
+    this.current.next = null;
+    this.currentIndex -= 1;
+    return this.current.config;
+  }
+
+  find(searchCb: (config: IOnboardingStep) => boolean) {
+    function checkStep(step: OnboardingStep): OnboardingStep | null {
+      if (searchCb(step.config)) return step;
+      return step.next ? checkStep(step.next) : null;
+    }
+
+    return this.head ? checkStep(this.head) : null;
+  }
+
+  private getFinalNode(startingNode: OnboardingStep): OnboardingStep {
+    return startingNode.next ? this.getFinalNode(startingNode.next) : startingNode;
+  }
+
+  /**
+   * flows
+   *
+   * Free User
+   * Login Splash -> Login Select -> Connect More Platforms (if <2 platforms) -> OBS Import (if obs installed) -> Ultra Upsell -> Setup Devices -> Themes
+   *
+   * Ultra User
+   * Login Splash -> Login Select -> Connect More Platforms (if <2 platforms) -> OBS Import (if obs installed) -> Setup Devices -> Themes
+   *
+   * Recording Mode
+   * Login Splash -> Recording Mode Login -> OBS Import (if obs installed)
+   */
+  private determineNextStep(
+    modifiers?: Record<TNavigationModifier, boolean>,
+  ): IOnboardingStep | void {
+    if (this.singletonPath) return;
+    const currentStep = this.current.config.name;
+
+    // A partial SLID auth has no usable platform yet, so the user can't continue without
+    // connecting one, no matter how many other accounts (e.g. Patreon or X) are linked
+    function needsConnectMore() {
+      return !!modifiers.isPartialSLAuth || (modifiers.loggedIn && modifiers.lessThanTwoPlatforms);
+    }
+
+    function advanceToConnectMoreOr(otherwiseFn: () => IOnboardingStep | void) {
+      if (needsConnectMore()) {
+        return { name: EOnboardingSteps.ConnectMore, isSkippable: !modifiers.isPartialSLAuth };
+      }
+      return otherwiseFn();
+    }
+
+    function advanceToOBSImportOr(otherwiseFn: () => IOnboardingStep | void) {
+      if (modifiers.obsInstalled) {
+        return { name: EOnboardingSteps.OBSImport };
+      }
+      return otherwiseFn();
+    }
+
+    function advanceToUltraOr(otherwiseFn: () => IOnboardingStep | void) {
+      if (modifiers.loggedIn && !modifiers.isUltra) {
+        return { name: EOnboardingSteps.Ultra, isSkippable: false };
+      }
+      return otherwiseFn();
+    }
+
+    const fromCurrentStep = {
+      [EOnboardingSteps.Splash]: () => {
+        return advanceToConnectMoreOr(() => ({
+          name: modifiers.recordingMode ? EOnboardingSteps.RecordingLogin : EOnboardingSteps.Login,
+          isSkippable: modifiers.loggedIn,
+        }));
+      },
+      [EOnboardingSteps.RecordingLogin]: () => {
+        if (modifiers.obsInstalled) return { name: EOnboardingSteps.OBSImport };
+      },
+      [EOnboardingSteps.Login]: () => {
+        return advanceToConnectMoreOr(() =>
+          advanceToOBSImportOr(() => advanceToUltraOr(() => ({ name: EOnboardingSteps.Devices }))),
+        );
+      },
+      [EOnboardingSteps.ConnectMore]: () => {
+        return advanceToOBSImportOr(() =>
+          advanceToUltraOr(() => ({ name: EOnboardingSteps.Devices })),
+        );
+      },
+      [EOnboardingSteps.OBSImport]: () => {
+        return advanceToUltraOr(() => ({ name: EOnboardingSteps.Devices }));
+      },
+      [EOnboardingSteps.Ultra]: () => ({ name: EOnboardingSteps.Devices }),
+      [EOnboardingSteps.Devices]: () => {
+        if (modifiers.loggedIn && !modifiers.hasSceneCollections) {
+          return { name: EOnboardingSteps.Themes };
+        }
+      },
+      [EOnboardingSteps.Themes]: () => {},
+    };
+
+    return fromCurrentStep[currentStep]();
+  }
+}
+
+class OnboardingStepState extends RealmObject implements IOnboardingStep {
+  name: EOnboardingSteps;
+  isSkippable: boolean;
+  isClosable: boolean;
+
+  static schema: ObjectSchema = {
+    name: 'OnboardingStepState',
+    properties: {
+      name: 'string',
+      isSkippable: { type: 'bool', default: false },
+      isClosable: { type: 'bool', default: false },
+    },
+  };
+}
+
+OnboardingStepState.register();
+
+class OnboardingServiceState extends RealmObject {
+  currentStep: IOnboardingStep;
+  showOnboarding: boolean;
+  currentIndex: number;
+  pathLength: number;
+
+  static schema: ObjectSchema = {
+    name: 'OnboardingServiceState',
+    properties: {
+      currentStep: 'OnboardingStepState',
+      showOnboarding: { type: 'bool', default: false },
+      currentIndex: { type: 'int', default: 0 },
+      pathLength: { type: 'int', default: 0 },
+    },
+  };
+}
+
+OnboardingServiceState.register();
+
+export class OnboardingV2Service extends Service {
+  @Inject() private recordingModeService: RecordingModeService;
+  @Inject() private userService: UserService;
+  @Inject() private obsImporterService: ObsImporterService;
+  @Inject() private sceneCollectionsService: SceneCollectionsService;
+  @Inject() private usageStatisticsService: UsageStatisticsService;
+  @Inject() private appService: AppService;
+  @Inject() private windowsService: WindowsService;
+
+  state = OnboardingServiceState.inject();
+
+  path: OnboardingPath = null;
+  singletonPath = false;
+  localStorageKey = 'UserHasBeenOnboarded';
+
+  // Uncomment to debug/style a specific step
+  // init() {
+  //   super.init();
+  //   this.initalizeView({ startingStep: { name: EOnboardingSteps.Ultra }, isSingleton: true });
+  // }
+
+  get currentStepName() {
+    return this.state.currentStep.name;
+  }
+
+  get modifiers(): TModifiers {
+    return {
+      loggedIn: this.userService.views.isLoggedIn,
+      isPartialSLAuth: this.userService.views.isPartialSLAuth,
+      isUltra: this.userService.views.isPrime,
+      recordingMode: this.recordingModeService.views.isRecordingModeEnabled,
+      obsInstalled: this.obsImporterService.views.isOBSinstalled(),
+      lessThanTwoPlatforms: this.userService.views.linkedPlatforms.length < 2,
+      hasSceneCollections: !!this.hasExistingSceneCollections,
+    };
+  }
+
+  /**
+   * Per-step handlers for the "Continue" button, resolved from navigation modifiers like
+   * `determineNextStep`. Returning `false` replaces the default advance to the next step.
+   */
+  private continueFuncs: PartialRec<EOnboardingSteps, (modifiers: TModifiers) => void | false> = {
+    [EOnboardingSteps.ConnectMore]: modifiers => {
+      // With only a partial SLID auth the user has no platform to continue with, so
+      // "continue" discards that auth and returns to the Login step to switch accounts
+      if (modifiers.isPartialSLAuth) {
+        this.userService.actions.finishSLAuth();
+        this.stepBack();
+        return false;
+      }
+    },
+    [EOnboardingSteps.Devices]: () => {
+      // The standalone devices step (from settings) only configures defaults, so only
+      // the full flow adds the webcam to the scene
+      if (!this.singletonPath) {
+        this.recordingModeService.actions.addRecordingWebcam();
+      }
+    },
+  };
+
+  showOnboardingIfNecessary() {
+    if (Utils.env.SLD_TESTS_SKIP_ONBOARDING) {
+      this.appService.setOnboarded(true);
+      return;
+    }
+    if (!Utils.env.SLD_FORCE_ONBOARDING_STEP && localStorage.getItem(this.localStorageKey)) {
+      return;
+    }
+    this.appService.setOnboarded(true);
+    this.showOnboarding();
+  }
+
+  showOnboarding() {
+    if (Utils.env.SLD_FORCE_ONBOARDING_STEP !== undefined) {
+      const isValidStep = Object.values(EOnboardingSteps).some(
+        step => step === Utils.env.SLD_FORCE_ONBOARDING_STEP,
+      );
+
+      if (isValidStep) {
+        console.log('Forcing onboarding step:', Utils.env.SLD_FORCE_ONBOARDING_STEP);
+        this.initalizeView({
+          startingStep: { name: Utils.env.SLD_FORCE_ONBOARDING_STEP as EOnboardingSteps },
+          isSingleton: true,
+        });
+        return;
+      }
+
+      console.log('Unknown step, forcing full onboarding', Utils.env.SLD_FORCE_ONBOARDING_STEP);
+    } else {
+      console.log('Starting onboarding flow');
+    }
+
+    this.initalizeView({
+      startingStep: { name: EOnboardingSteps.Splash, isSkippable: false, isClosable: false },
+      isSingleton: false,
+    });
+  }
+
+  showLogin() {
+    this.initalizeView({
+      startingStep: { name: EOnboardingSteps.Login, isSkippable: false },
+      isSingleton: true,
+    });
+  }
+
+  showObsImport() {
+    this.initalizeView({
+      startingStep: { name: EOnboardingSteps.OBSImport, isSkippable: false },
+      isSingleton: true,
+    });
+  }
+
+  showDevices() {
+    this.initalizeView({
+      startingStep: { name: EOnboardingSteps.Devices, isSkippable: false },
+      isSingleton: true,
+    });
+  }
+
+  /**
+   * Advances from the "Continue" button. Unlike `takeStep`, runs the current step's
+   * continue func first, which can return `false` to replace the default advance.
+   */
+  continueStep() {
+    if (this.continueFuncs[this.currentStepName]?.(this.modifiers) === false) return;
+    this.takeStep();
+  }
+
+  takeStep(skipped?: boolean) {
+    this.recordOnboardingNavEvent(skipped ? 'skip' : 'continue');
+    const nextStep = this.path.takeNextStep(this.modifiers);
+    // if there are no additional steps we've reached the end of the path
+    if (!nextStep) {
+      this.completeOnboarding();
+      return;
+    }
+    this.setCurrentStep(nextStep);
+    this.setIndex(this.path.index);
+  }
+
+  stepBack() {
+    this.recordOnboardingNavEvent('backtrack');
+    const prevStep = this.path.takePrevStep();
+    if (!prevStep) return;
+    this.setCurrentStep(prevStep);
+    this.setIndex(this.path.index);
+  }
+
+  closeOnboarding() {
+    this.completeOnboarding(true);
+  }
+
+  recordOnboardingInteractionEvent(type: TOnboardingInteractionEvent, data?: any) {
+    this.usageStatisticsService.actions.recordAnalyticsEvent('Onboarding', {
+      isUltra: this.userService.views.isPrime,
+      hasExistingSceneCollections: this.hasExistingSceneCollections,
+      hasOBSInstalled: this.obsImporterService.views.isOBSinstalled(),
+      platforms: this.userService.views.linkedPlatforms,
+      ...data,
+      type,
+    });
+  }
+
+  private initalizeView(config: IOnboardingInitialization) {
+    this.windowsService.actions.showModalLayer('main');
+    this.singletonPath = config.isSingleton;
+    this.path = new OnboardingPath(config.isSingleton);
+    this.path.append(config.startingStep);
+    this.setCurrentStep(config.startingStep);
+    this.setIndex(0);
+    this.setShowOnboarding(true);
+  }
+
+  private completeOnboarding(closedEarly?: boolean) {
+    if (!this.singletonPath) {
+      localStorage.setItem(this.localStorageKey, 'true');
+      remote.session.defaultSession.flushStorageData();
+      console.log('Set onboarding key successful.');
+      this.recordOnboardingNavEvent(closedEarly ? 'closed' : 'completed');
+    }
+    this.setShowOnboarding(false);
+    this.windowsService.actions.hideModalLayer('main');
+    this.setCurrentStep(null);
+    this.path = null;
+  }
+
+  private recordOnboardingNavEvent(type: TOnboardingNavigationEvent) {
+    this.usageStatisticsService.actions.recordAnalyticsEvent('Onboarding', {
+      type,
+      currentStep: this.currentStepName,
+      prevStep: this.path?.prevStepName,
+      nextStep: this.path?.nextStepName,
+      isUltra: this.userService.views.isPrime,
+      hasExistingSceneCollections: this.hasExistingSceneCollections,
+      hasOBSInstalled: this.obsImporterService.views.isOBSinstalled(),
+      platforms: this.userService.views.linkedPlatforms,
+    });
+  }
+
+  private setCurrentStep(step: IOnboardingStep | false) {
+    if (!step) return;
+    this.state.db.write(() => {
+      this.state.currentStep = { isSkippable: false, isClosable: false, ...step };
+    });
+  }
+
+  private setShowOnboarding(val: boolean) {
+    this.state.db.write(() => (this.state.showOnboarding = val));
+  }
+
+  private setIndex(val: number) {
+    this.state.db.write(() => (this.state.currentIndex = val));
+  }
+
+  get hasExistingSceneCollections() {
+    return !(
+      this.sceneCollectionsService.loadableCollections.length === 1 &&
+      this.sceneCollectionsService.loadableCollections[0].auto
+    );
+  }
+}

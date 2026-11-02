@@ -1,9 +1,6 @@
-import WritableStream = NodeJS.WritableStream;
 import os from 'os';
 import crypto from 'crypto';
-import { PersistentStatefulService, Inject, mutation } from 'services/core';
-import { IObsInput } from 'components/obs/inputs/ObsInput';
-import { ISettingsSubCategory } from 'services/settings/index';
+import { PersistentStatefulService, Inject, mutation, ViewHandler } from 'services/core';
 import {
   JsonrpcService,
   E_JSON_RPC_ERROR,
@@ -11,15 +8,37 @@ import {
   IJsonRpcRequest,
   IJsonRpcResponse,
 } from 'services/api/jsonrpc/index';
-import { IIPAddressDescription, ITcpServerServiceApi, ITcpServersSettings } from './tcp-server-api';
 import { UsageStatisticsService } from 'services/usage-statistics';
 import { ExternalApiService } from '../external-api';
-import { SceneCollectionsService } from 'services/scene-collections';
+// eslint-disable-next-line no-undef
+import WritableStream = NodeJS.WritableStream;
+import { $t } from 'services/i18n';
+import { OS, getOS } from 'util/operating-systems';
 
 const net = require('net');
 
 const LOCAL_HOST_NAME = '127.0.0.1';
 const WILDCARD_HOST_NAME = '0.0.0.0';
+
+export interface ITcpServersSettings {
+  token: string;
+  namedPipe: {
+    enabled: boolean;
+    pipeName: string;
+  };
+  websockets: {
+    enabled: boolean;
+    port: number;
+    allowRemote: boolean;
+  };
+}
+
+export interface IIPAddressDescription {
+  address: string;
+  interface: string;
+  family: 'IPv4' | 'IPv6';
+  internal: boolean;
+}
 
 interface IClient {
   id: number;
@@ -44,11 +63,54 @@ interface IServer {
 
 const TCP_PORT = 28194;
 
+class TcpServerServiceViews extends ViewHandler<ITcpServersSettings> {
+  get settings() {
+    return this.state;
+  }
+
+  get metadata() {
+    return {
+      namedPipe: {
+        enabled: {
+          type: 'checkbox',
+          label: $t('Enabled'),
+          children: {
+            pipeName: {
+              type: 'text',
+              label: $t('Pipe Name'),
+              displayed: this.state.namedPipe.enabled,
+            },
+          },
+        },
+      },
+      websockets: {
+        enabled: {
+          type: 'checkbox',
+          label: $t('Enabled'),
+          children: {
+            allowRemote: {
+              type: 'checkbox',
+              label: $t('Allow Remote Connections'),
+              displayed: this.state.websockets.enabled,
+            },
+            port: {
+              type: 'number',
+              label: $t('Port'),
+              min: 0,
+              max: 65535,
+              displayed: this.state.websockets.enabled,
+            },
+          },
+        },
+      },
+    };
+  }
+}
+
 /**
  * A transport layer for TCP and Websockets communications with internal API
  */
-export class TcpServerService extends PersistentStatefulService<ITcpServersSettings>
-  implements ITcpServerServiceApi {
+export class TcpServerService extends PersistentStatefulService<ITcpServersSettings> {
   static defaultState: ITcpServersSettings = {
     token: '',
     namedPipe: {
@@ -69,9 +131,17 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
   private nextClientId = 1;
   private servers: IServer[] = [];
   private isRequestsHandlingStopped = false;
+  private isEventsSendingStopped = true;
+
+  // if true then execute API request even if "isRequestsHandlingStopped" flag is set
+  private forceRequests = false;
 
   // enable to debug
   private enableLogs = false;
+
+  get views() {
+    return new TcpServerServiceViews(this.state);
+  }
 
   init() {
     super.init();
@@ -80,21 +150,27 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
 
   listen() {
     this.listenConnections(this.createTcpServer());
-    if (this.state.namedPipe.enabled) this.listenConnections(this.createNamedPipeServer());
+
+    // Named pipe is windows only
+    if (this.state.namedPipe.enabled && getOS() === OS.Windows) {
+      this.listenConnections(this.createNamedPipeServer());
+    }
+
     if (this.state.websockets.enabled) this.listenConnections(this.createWebsoketsServer());
   }
 
   /**
    * stop handle any requests
    * each API request will be responded with "API is busy" error
-   * this method doesn't stop event emitting
    */
-  stopRequestsHandling() {
+  stopRequestsHandling(stopEventsToo = true) {
     this.isRequestsHandlingStopped = true;
+    this.isEventsSendingStopped = stopEventsToo;
   }
 
   startRequestsHandling() {
     this.isRequestsHandlingStopped = false;
+    this.isEventsSendingStopped = false;
   }
 
   stopListening() {
@@ -102,11 +178,15 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
     Object.keys(this.clients).forEach(clientId => this.disconnectClient(Number(clientId)));
   }
 
+  get websocketRemoteConnectionEnabled() {
+    return this.state.websockets.enabled && this.state.websockets.allowRemote;
+  }
+
   enableWebsoketsRemoteConnections() {
     this.stopListening();
 
     // update websockets settings
-    const defaultWebsoketsSettings = this.getDefaultSettings().websockets;
+    const defaultWebsoketsSettings = TcpServerService.defaultState.websockets;
     this.setSettings({
       websockets: {
         ...defaultWebsoketsSettings,
@@ -118,8 +198,21 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
     this.listen();
   }
 
-  getDefaultSettings(): ITcpServersSettings {
-    return TcpServerService.defaultState;
+  disableWebsocketsRemoteConnections() {
+    this.stopListening();
+    // update websockets settings
+    const defaultWebsoketsSettings = TcpServerService.defaultState.websockets;
+    this.setSettings({
+      websockets: {
+        ...defaultWebsoketsSettings,
+      },
+    });
+
+    this.listen();
+  }
+
+  restoreDefaultSettings() {
+    this.setSettings(TcpServerService.defaultState);
   }
 
   setSettings(settings: Partial<ITcpServersSettings>) {
@@ -131,69 +224,6 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
 
   getSettings(): ITcpServersSettings {
     return this.state;
-  }
-
-  getApiSettingsFormData(): ISettingsSubCategory[] {
-    const settings = this.state;
-    return [
-      {
-        nameSubCategory: 'Named Pipe',
-        codeSubCategory: 'namedPipe',
-        parameters: [
-          <IObsInput<boolean>>{
-            value: settings.namedPipe.enabled,
-            name: 'enabled',
-            description: 'Enabled',
-            type: 'OBS_PROPERTY_BOOL',
-            visible: true,
-            enabled: true,
-          },
-
-          <IObsInput<string>>{
-            value: settings.namedPipe.pipeName,
-            name: 'pipeName',
-            description: 'Pipe Name',
-            type: 'OBS_PROPERTY_TEXT',
-            visible: true,
-            enabled: settings.namedPipe.enabled,
-          },
-        ],
-      },
-      {
-        nameSubCategory: 'Websockets',
-        codeSubCategory: 'websockets',
-        parameters: [
-          <IObsInput<boolean>>{
-            value: settings.websockets.enabled,
-            name: 'enabled',
-            description: 'Enabled',
-            type: 'OBS_PROPERTY_BOOL',
-            visible: true,
-            enabled: true,
-          },
-
-          <IObsInput<boolean>>{
-            value: settings.websockets.allowRemote,
-            name: 'allowRemote',
-            description: 'Allow Remote Connections',
-            type: 'OBS_PROPERTY_BOOL',
-            visible: true,
-            enabled: settings.websockets.enabled,
-          },
-
-          <IObsInput<number>>{
-            value: settings.websockets.port,
-            name: 'port',
-            description: 'Port',
-            type: 'OBS_PROPERTY_INT',
-            minVal: 0,
-            maxVal: 65535,
-            visible: true,
-            enabled: settings.websockets.enabled,
-          },
-        ],
-      },
-    ];
   }
 
   getIPAddresses(): IIPAddressDescription[] {
@@ -210,7 +240,9 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
         });
       });
     });
-    return addresses;
+
+    // Sort IPv4 before IPv6
+    return addresses.sort((a, b) => parseInt(a.family[3], 10) - parseInt(b.family[3], 10));
   }
 
   generateToken(): string {
@@ -275,7 +307,7 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
   }
 
   private onConnectionHandler(socket: WritableStream, server: IServer) {
-    this.log('new connection', socket);
+    this.log('new connection');
 
     const id = this.nextClientId++;
     const client: IClient = {
@@ -286,12 +318,15 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
       isAuthorized: false,
     };
     this.clients[id] = client;
+    this.log(`Id assigned ${id}`);
 
-    if (server.type === 'namedPipe' || this.isLocalClient(client)) {
+    // manual authorization for local clients is not required except for websokets
+    // disabling authorization for local websoket clients introduces a breach where any website can establish connection to the localhost
+    if (server.type === 'namedPipe' || (server.type === 'tcp' && this.isLocalClient(client))) {
       this.authorizeClient(client);
     }
 
-    socket.on('data', (data: any) => {
+    socket.on('data', (data: Buffer) => {
       this.onRequestHandler(client, data.toString());
     });
 
@@ -312,6 +347,8 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
         throw e;
       }
     });
+
+    this.log(`Client ${id} ready`);
   }
 
   private authorizeClient(client: IClient) {
@@ -326,26 +363,27 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
   }
 
   private onRequestHandler(client: IClient, data: string) {
-    this.log('tcp request', data);
+    this.log(`tcp request from ${client.id}`, data);
 
-    if (this.isRequestsHandlingStopped) {
+    if (this.isRequestsHandlingStopped && !this.forceRequests) {
       this.sendResponse(
         client,
         this.jsonrpcService.createError(null, {
           code: E_JSON_RPC_ERROR.INTERNAL_JSON_RPC_ERROR,
           message: 'API server is busy. Try again later',
         }),
+        true,
       );
 
       return;
     }
 
     const requests = data.split('\n');
-    requests.forEach(requestString => {
+
+    for (const requestString of requests) {
       if (!requestString) return;
       try {
         const request: IJsonRpcRequest = JSON.parse(requestString);
-        this.usageStatisticsService.recordAnalyticsEvent('TCP_API_REQUEST', request);
 
         const errorMessage = this.validateRequest(request);
 
@@ -372,7 +410,7 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
         }
 
         this.sendResponse(client, response);
-      } catch (e) {
+      } catch (e: unknown) {
         this.sendResponse(
           client,
           this.jsonrpcService.createError(null, {
@@ -383,8 +421,16 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
               'by a single newline character LF ( ASCII code 10)',
           }),
         );
+
+        // Disconnect and stop processing requests
+        // IMPORTANT: For security reasons it is important we immediately stop
+        // processing requests that don't look will well formed JSON RPC calls.
+        // Without this check, it is possible to send normal HTTP requests
+        // from an unprivileged web page and make calls to this API.
+        this.disconnectClient(client.id);
+        return;
       }
-    });
+    }
   }
 
   private onServiceEventHandler(event: IJsonRpcResponse<IJsonRpcEvent>) {
@@ -395,14 +441,17 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
 
       // these events will be sent to the client even if isRequestsHandlingStopped = true
       // this allows to send this event even if the app is in the loading state
-      const whitelistedEvents: (keyof SceneCollectionsService)[] = [
+      // TODO: This is pretty brittle - we should probably consider moving to filtering out
+      // specific events, rather than filtering out all events by default.
+      const allowlistedEvents = [
         'collectionWillSwitch',
         'collectionAdded',
         'collectionRemoved',
         'collectionSwitched',
         'collectionUpdated',
+        'studioModeChanged',
       ];
-      const force = (whitelistedEvents as string[]).includes(eventName);
+      const force = (allowlistedEvents as string[]).includes(eventName);
 
       const needToSendEvent =
         client.listenAllSubscriptions || client.subscriptions.includes(event.result.resourceId);
@@ -419,6 +468,21 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
   }
 
   private hadleTcpServerDirectives(client: IClient, request: IJsonRpcRequest) {
+    // Prevent access to certain particularly sensitive services
+    const protectedResources = ['FileManagerService'];
+
+    if (protectedResources.includes(request.params.resource)) {
+      this.sendResponse(
+        client,
+        this.jsonrpcService.createError(request, {
+          code: E_JSON_RPC_ERROR.INTERNAL_JSON_RPC_ERROR,
+          message: 'The requested resource is not available.',
+        }),
+      );
+
+      return true;
+    }
+
     // handle auth
     if (request.method === 'auth' && request.params.resource === 'TcpServerService') {
       if (this.state.token && request.params.args[0] === this.state.token) {
@@ -480,22 +544,42 @@ export class TcpServerService extends PersistentStatefulService<ITcpServersSetti
       });
       return true;
     }
+
+    // set forceRequests flag
+    // when forceRequest is true API responds even while loading a SceneCollection
+    if (request.method === 'forceRequests' && request.params.resource === 'TcpServerService') {
+      this.forceRequests = request.params.args[0];
+      this.sendResponse(client, {
+        jsonrpc: '2.0',
+        id: request.id,
+        result: true,
+      });
+      return true;
+    }
   }
 
   private onDisconnectHandler(client: IClient) {
-    this.log('client disconnected');
+    this.log(`client disconnected ${client.id}`);
     delete this.clients[client.id];
   }
 
   private sendResponse(client: IClient, response: IJsonRpcResponse<any>, force = false) {
-    if (this.isRequestsHandlingStopped && !force) return;
+    if (this.isEventsSendingStopped) {
+      if (!force && !this.forceRequests) return;
+    }
 
-    this.log('send response', response);
+    if (!client.socket.writable) {
+      // prevent attempts to write to a closed socket
+
+      this.log('cannot write to closed socket to send response', response);
+      return;
+    }
 
     // unhandled exceptions completely destroy Rx.Observable subscription
     try {
+      this.log('send response', response);
       client.socket.write(`${JSON.stringify(response)}\n`);
-    } catch (e) {
+    } catch (e: unknown) {
       // probably the client has been silently disconnected
       console.info('unable to send response', response, e);
     }

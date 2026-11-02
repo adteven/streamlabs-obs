@@ -1,43 +1,68 @@
+import { IObsListInput, IObsListOption, TObsValue } from 'components/obs/inputs/ObsInput';
 import * as fs from 'fs';
-import Vue from 'vue';
-import { Subject } from 'rxjs';
 import cloneDeep from 'lodash/cloneDeep';
-import { IObsListOption, TObsValue } from 'components/obs/inputs/ObsInput';
-import { StatefulService, mutation } from 'services/core/stateful-service';
-import * as obs from '../../../obs-api';
+import { Subject } from 'rxjs';
+import { InitAfter } from 'services/core';
 import { Inject } from 'services/core/injector';
-import namingHelpers from 'util/NamingHelpers';
-import { WindowsService } from 'services/windows';
-import { WidgetsService, WidgetType, WidgetDisplayData } from 'services/widgets';
-import { DefaultManager } from './properties-managers/default-manager';
-import { WidgetManager } from './properties-managers/widget-manager';
-import { ScenesService, ISceneItem } from 'services/scenes';
-import { StreamlabelsManager } from './properties-managers/streamlabels-manager';
-import { PlatformAppManager } from './properties-managers/platform-app-manager';
+import { mutation, StatefulService, ViewHandler } from 'services/core/stateful-service';
+import { GuestCamService } from 'services/guest-cam';
+import { DefaultHardwareService, HardwareService } from 'services/hardware';
+import { $t } from 'services/i18n';
+import { NavigationService } from 'services/navigation';
+import { PlatformAppsService } from 'services/platform-apps';
+import { ISceneItem, ScenesService } from 'services/scenes';
+import { VideoSettingsService } from 'services/settings-v2';
+import { SourceFiltersService } from 'services/source-filters';
+import { UsageStatisticsService } from 'services/usage-statistics';
 import { UserService } from 'services/user';
+import { TWidgetType, WidgetDisplayData, WidgetsService, WidgetType } from 'services/widgets';
+import { WindowsService } from 'services/windows';
+import namingHelpers from 'util/NamingHelpers';
+import { assertIsDefined } from 'util/properties-type-guards';
+import uuid from 'uuid/v4';
+import Vue from 'vue';
+import * as obs from '../../../obs-api';
+import { EDeinterlaceFieldOrder, EDeinterlaceMode, EMonitoringType } from '../../../obs-api';
+import { AudioService, E_AUDIO_CHANNELS } from '../audio';
+import { CustomizationService } from '../customization';
+import { EAvailableFeatures, IncrementalRolloutService } from '../incremental-rollout';
 import {
   IActivePropertyManager,
   ISource,
   ISourceAddOptions,
-  ISourcesServiceApi,
   ISourcesState,
-  TSourceType,
   Source,
   TPropertiesManager,
+  TSourceType,
 } from './index';
-import uuid from 'uuid/v4';
-import { $t } from 'services/i18n';
-import { SourceDisplayData } from './sources-data';
-import { NavigationService } from 'services/navigation';
-import { PlatformAppsService } from 'services/platform-apps';
-import { HardwareService } from 'services/hardware';
-import { AudioService } from '../audio';
+import { DefaultManager } from './properties-managers/default-manager';
+import { IconLibraryManager } from './properties-managers/icon-library-manager';
+import { PlatformAppManager } from './properties-managers/platform-app-manager';
 import { ReplayManager } from './properties-managers/replay-manager';
+import { SmartBrowserSourceManager } from './properties-managers/smart-browser-source-manager';
+import { StreamlabelsManager } from './properties-managers/streamlabels-manager';
+import { WidgetManager } from './properties-managers/widget-manager';
+import { SourceDisplayData } from './sources-data';
+import { ReactiveDataService } from 'app-services';
+import { IReactiveDataEditorProps } from 'components-react/windows/reactive-data-editor/types';
+
+export { EDeinterlaceFieldOrder, EDeinterlaceMode } from '../../../obs-api';
 
 const AudioFlag = obs.ESourceOutputFlags.Audio;
 const VideoFlag = obs.ESourceOutputFlags.Video;
 const AsyncFlag = obs.ESourceOutputFlags.Async;
 const DoNotDuplicateFlag = obs.ESourceOutputFlags.DoNotDuplicate;
+const ForceUiRefresh = obs.ESourceOutputFlags.ForceUiRefresh;
+
+/**
+ * Sunset widgets. The enum values stay reserved because they are persisted in user
+ * scene collections, but these widgets have no settings window anymore.
+ */
+const RETIRED_WIDGETS: WidgetType[] = [
+  WidgetType.StarsGoal,
+  WidgetType.SupporterGoal,
+  WidgetType.GameWidget,
+];
 
 export const PROPERTIES_MANAGER_TYPES = {
   default: DefaultManager,
@@ -45,6 +70,8 @@ export const PROPERTIES_MANAGER_TYPES = {
   streamlabels: StreamlabelsManager,
   platformApp: PlatformAppManager,
   replay: ReplayManager,
+  iconLibrary: IconLibraryManager,
+  smartBrowserSource: SmartBrowserSourceManager,
 };
 
 interface IObsSourceCallbackInfo {
@@ -54,12 +81,149 @@ interface IObsSourceCallbackInfo {
   flags: number;
 }
 
-export class SourcesService extends StatefulService<ISourcesState> implements ISourcesServiceApi {
+/**
+ * These sources are valid on windows
+ */
+export const windowsSources: TSourceType[] = [
+  'image_source',
+  'color_source',
+  'browser_source',
+  'slideshow',
+  'ffmpeg_source',
+  'text_gdiplus',
+  'monitor_capture',
+  'window_capture',
+  'game_capture',
+  'dshow_input',
+  'wasapi_input_capture',
+  'wasapi_output_capture',
+  'decklink-input',
+  'scene',
+  'ndi_source',
+  'openvr_capture',
+  'screen_capture',
+  'liv_capture',
+  'ovrstream_dc_source',
+  'vlc_source',
+  'soundtrack_source',
+  'mediasoupconnector',
+  'wasapi_process_output_capture',
+  'spout_capture',
+  'smart_browser_source',
+];
+
+/**
+ * These sources are valid on mac
+ */
+export const macSources: TSourceType[] = [
+  'image_source',
+  'color_source',
+  'browser_source',
+  'slideshow',
+  'ffmpeg_source',
+  'text_ft2_source',
+  'scene',
+  'coreaudio_input_capture',
+  'coreaudio_output_capture',
+  'macos_avcapture',
+  'display_capture',
+  'audio_line',
+  'ndi_source',
+  'mac_screen_capture',
+  'vlc_source',
+  'window_capture',
+  'syphon-input',
+  'decklink-input',
+  'mediasoupconnector',
+];
+
+export const reactWidgets: TWidgetType[] = [
+  'AlertBox',
+  'BitGoal',
+  'CharityGoal',
+  'ChatBox',
+  'Credits',
+  'CustomWidget',
+  'DonationGoal',
+  'DonationTicker',
+  'EmoteWall',
+  'EventList',
+  'FollowerGoal',
+  'GamePulseWidget',
+  'SpinWheel',
+  'SponsorBanner',
+  'StreamBoss',
+  'SubGoal',
+  'SubscriberGoal',
+  'SuperchatGoal',
+  'TipJar',
+  'ViewerCount',
+  // 'ChatHighlight',
+  // 'MediaShare',
+  // 'Poll',
+];
+
+class SourcesViews extends ViewHandler<ISourcesState> {
+  get sources(): Source[] {
+    return Object.values(this.state.sources).map(
+      sourceModel => this.getSource(sourceModel.sourceId)!,
+    );
+  }
+
+  get temporarySources(): Source[] {
+    return Object.values(this.state.temporarySources).map(
+      sourceModel => this.getSource(sourceModel.sourceId)!,
+    );
+  }
+
+  getSource(id: string): Source | null {
+    return this.state.sources[id] || this.state.temporarySources[id] ? new Source(id) : null;
+  }
+
+  getSourceByChannel(channel: E_AUDIO_CHANNELS): Source | null {
+    const id = Object.values(this.state.sources).find(s => {
+      return s.channel === channel;
+    })?.sourceId;
+
+    return id != null ? this.getSource(id) : null;
+  }
+
+  getSources() {
+    return this.sources;
+  }
+
+  getSourcesByName(name: string): Source[] {
+    const sourceModels = Object.values(this.state.sources).filter(source => {
+      return source.name === name;
+    });
+    return sourceModels.map(sourceModel => this.getSource(sourceModel.sourceId)!);
+  }
+
+  getSourcesByType(type: TSourceType) {
+    return this.sources.filter(s => s.type === type);
+  }
+
+  isRetiredWidget(id: string): boolean {
+    const source = this.getSource(id);
+    if (!source || source.getPropertiesManagerType() !== 'widget') return false;
+
+    return RETIRED_WIDGETS.includes(source.getPropertiesManagerSettings().widgetType);
+  }
+
+  suggestName(name?: string): string {
+    if (!name) return '';
+    return namingHelpers.suggestName(name, (name: string) => this.getSourcesByName(name).length);
+  }
+}
+
+@InitAfter('VideoSettingsService')
+export class SourcesService extends StatefulService<ISourcesState> {
   static initialState = {
     sources: {},
     temporarySources: {}, // don't save temporarySources in the config file
   } as ISourcesState;
 
+  sourceCreated = new Subject<{ type: TSourceType; source: ISource }>();
   sourceAdded = new Subject<ISource>();
   sourceUpdated = new Subject<ISource>();
   sourceRemoved = new Subject<ISource>();
@@ -72,11 +236,30 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
   @Inject() private platformAppsService: PlatformAppsService;
   @Inject() private hardwareService: HardwareService;
   @Inject() private audioService: AudioService;
+  @Inject() private defaultHardwareService: DefaultHardwareService;
+  @Inject() private usageStatisticsService: UsageStatisticsService;
+  @Inject() private sourceFiltersService: SourceFiltersService;
+  @Inject() private videoSettingsService: VideoSettingsService;
+  @Inject() private customizationService: CustomizationService;
+  @Inject() private incrementalRolloutService: IncrementalRolloutService;
+  @Inject() private guestCamService: GuestCamService;
+  @Inject() private reactiveDataService: ReactiveDataService;
+
+  sourceDisplayData = SourceDisplayData(); // cache source display data
+
+  get views() {
+    return new SourcesViews(this.state);
+  }
 
   /**
    * Maps a source id to a property manager
    */
   propertiesManagers: Dictionary<IActivePropertyManager> = {};
+
+  /**
+   * Sources that failed to create obs inputs on initial load
+   */
+  missingInputs: string[] = [];
 
   protected init() {
     obs.NodeObs.RegisterSourceCallback((objs: IObsSourceCallbackInfo[]) =>
@@ -100,9 +283,14 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     id: string;
     name: string;
     type: TSourceType;
+    configurable: boolean;
+    width: number;
+    height: number;
     channel?: number;
     isTemporary?: boolean;
     propertiesManagerType?: TPropertiesManager;
+    deinterlaceMode?: EDeinterlaceMode;
+    deinterlaceFieldOrder?: EDeinterlaceFieldOrder;
   }) {
     const id = addOptions.id;
     const sourceModel: ISource = {
@@ -117,14 +305,22 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
       video: false,
       async: false,
       doNotDuplicate: false,
+      forceUiRefresh: false,
+
+      configurable: addOptions.configurable,
 
       // Unscaled width and height
-      width: 0,
-      height: 0,
+      width: addOptions.width,
+      height: addOptions.height,
 
       muted: false,
-      resourceId: `Source${JSON.stringify([id])}`,
       channel: addOptions.channel,
+
+      forceHidden: false,
+      forceMuted: false,
+
+      deinterlaceMode: addOptions.deinterlaceMode,
+      deinterlaceFieldOrder: addOptions.deinterlaceFieldOrder,
     };
 
     if (addOptions.isTemporary) {
@@ -147,7 +343,10 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
   private UPDATE_SOURCE(sourcePatch: TPatch<ISource>) {
     if (this.state.sources[sourcePatch.id]) {
       Object.assign(this.state.sources[sourcePatch.id], sourcePatch);
+    } else if (this.state.temporarySources[sourcePatch.id]) {
+      Object.assign(this.state.temporarySources[sourcePatch.id], sourcePatch);
     } else {
+      this.state.temporarySources[sourcePatch.id] = {} as ISource;
       Object.assign(this.state.temporarySources[sourcePatch.id], sourcePatch);
     }
   }
@@ -158,13 +357,59 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     settings: Dictionary<any> = {},
     options: ISourceAddOptions = {},
   ): Source {
-    const id: string = options.sourceId || `${type}_${uuid()}`;
+    const id: string = options?.sourceId || `${type}_${uuid()}`;
     const obsInputSettings = this.getObsSourceCreateSettings(type, settings);
-    const obsInput = obs.InputFactory.create(type, id, obsInputSettings);
 
-    this.addSource(obsInput, name, options);
+    // Universally disabled for security reasons
+    if (obsInputSettings.is_media_flag) {
+      obsInputSettings.is_media_flag = false;
+    }
 
-    return this.getSource(id);
+    // This call to obs to create the input must be caught, otherwise it causes an app crash
+    try {
+      const computedType = obsInputSettings.__remappedType || type;
+      const obsInput = obs.InputFactory.create(computedType, id, obsInputSettings);
+
+      // For Guest Cam, we default sources to monitor so the streamer can hear guests
+      if (type === 'mediasoupconnector' && !options.audioSettings?.monitoringType) {
+        options.audioSettings ??= {};
+        options.audioSettings.monitoringType = EMonitoringType.MonitoringOnly;
+      }
+
+      if (type === 'smart_browser_source') {
+        options.propertiesManager = 'smartBrowserSource';
+      }
+
+      this.addSource(obsInput, name, options);
+
+      if (
+        this.defaultHardwareService.state.defaultVideoDevice === obsInputSettings.video_device_id &&
+        this.defaultHardwareService.state.presetFilter !== '' &&
+        this.defaultHardwareService.state.presetFilter !== 'none'
+      ) {
+        this.sourceFiltersService.addPresetFilter(
+          id,
+          this.defaultHardwareService.state.presetFilter,
+        );
+      }
+
+      if (
+        this.defaultHardwareService.state.defaultVideoDevice === obsInputSettings.device &&
+        this.defaultHardwareService.state.presetFilter !== '' &&
+        this.defaultHardwareService.state.presetFilter !== 'none'
+      ) {
+        this.sourceFiltersService.addPresetFilter(
+          id,
+          this.defaultHardwareService.state.presetFilter,
+        );
+      }
+    } catch (e: unknown) {
+      console.log('Error creating obs source: ', e);
+    }
+
+    const source = this.views.getSource(id)!;
+    this.sourceCreated.next({ type, source: source.state });
+    return source;
   }
 
   addSource(obsInput: obs.IInput, name: string, options: ISourceAddOptions = {}) {
@@ -174,32 +419,112 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     const id = obsInput.name;
     const type: TSourceType = obsInput.id as TSourceType;
     const managerType = options.propertiesManager || 'default';
+    const width = options?.display
+      ? this.videoSettingsService.baseResolutions[options?.display].baseWidth
+      : obsInput.width;
+    const height = options?.display
+      ? this.videoSettingsService.baseResolutions[options?.display].baseHeight
+      : obsInput.height;
+
     this.ADD_SOURCE({
       id,
       name,
       type,
+      width,
+      height,
+      configurable: obsInput.configurable,
       channel: options.channel,
       isTemporary: options.isTemporary,
       propertiesManagerType: managerType,
+      deinterlaceMode: options.deinterlaceMode || EDeinterlaceMode.Disable,
+      deinterlaceFieldOrder: options.deinterlaceFieldOrder || EDeinterlaceFieldOrder.Top,
     });
-    const source = this.getSource(id);
+    const source = this.views.getSource(id)!;
     const muted = obsInput.muted;
     this.UPDATE_SOURCE({ id, muted });
-    this.updateSourceFlags(source.state, obsInput.outputFlags, true);
+    this.updateSourceFlags(source, obsInput.outputFlags, true);
 
+    if (type === 'ndi_source') {
+      this.usageStatisticsService.recordFeatureUsage('NDI');
+    } else if (type === 'openvr_capture') {
+      this.usageStatisticsService.recordFeatureUsage('OpenVR');
+    } else if (type === 'screen_capture') {
+      this.usageStatisticsService.recordFeatureUsage('SimpleCapture');
+    } else if (type === 'vlc_source') {
+      this.usageStatisticsService.recordFeatureUsage('VLC');
+    } else if (type === 'soundtrack_source') {
+      this.usageStatisticsService.recordFeatureUsage('soundtrackSource');
+    } else if (type === 'wasapi_input_capture' || type === 'coreaudio_input_capture') {
+      this.usageStatisticsService.recordFeatureUsage('AudioInputSource');
+    } else if (type === 'dshow_input') {
+      this.usageStatisticsService.recordFeatureUsage('DShowInput');
+
+      const device = this.hardwareService.state.dshowDevices.find(
+        d => d.id === obsInput.settings.video_device_id,
+      );
+
+      if (device) {
+        this.usageStatisticsService.recordAnalyticsEvent('WebcamUse', {
+          device: device.description,
+        });
+      }
+    } else if (type === 'window_capture') {
+      this.usageStatisticsService.recordFeatureUsage('WindowCapture');
+    } else if (type === 'monitor_capture') {
+      this.usageStatisticsService.recordFeatureUsage('DisplayCapture');
+    } else if (type === 'game_capture') {
+      this.usageStatisticsService.recordFeatureUsage('GameCapture');
+    } else if (type === 'spout_capture') {
+      this.usageStatisticsService.recordFeatureUsage('SpoutCapture');
+    }
     const managerKlass = PROPERTIES_MANAGER_TYPES[managerType];
     this.propertiesManagers[id] = {
-      manager: new managerKlass(obsInput, options.propertiesManagerSettings || {}),
+      manager: new managerKlass(obsInput, options.propertiesManagerSettings || {}, id),
       type: managerType,
     };
 
+    //function to check for missing device, return device description (display name)
+    function checkForDefaultDevice(): string {
+      const props = source.getPropertiesFormData();
+      const deviceProp = props.find(p => p.name === 'device_id');
+
+      if (deviceProp && deviceProp.type === 'OBS_PROPERTY_LIST') {
+        const deviceOption = (deviceProp as IObsListInput<string>).options.find(
+          opt => opt.value === deviceProp.value,
+        );
+        if (!deviceOption) {
+          const updateSettings = source.getSettings();
+          updateSettings['device_id'] = 'default';
+          source.updateSettings(updateSettings);
+          return 'Default';
+        }
+        return deviceOption.description;
+      }
+      return 'Default';
+    }
+
+    // Needs to happen after properties manager creation, otherwise we can't fetch props
+    if (type === 'wasapi_input_capture') {
+      this.usageStatisticsService.recordAnalyticsEvent('MicrophoneUse', {
+        device: checkForDefaultDevice(),
+      });
+    } else if (type === 'wasapi_output_capture') {
+      checkForDefaultDevice();
+    }
+
     this.sourceAdded.next(source.state);
 
-    if (options.audioSettings) this.audioService.getSource(id).setSettings(options.audioSettings);
+    if (options.audioSettings) {
+      this.audioService.views.getSource(id).setSettings(options.audioSettings);
+    }
+
+    if (type === 'mediasoupconnector' && options.guestCamStreamId) {
+      this.guestCamService.setGuestSource(options.guestCamStreamId, id);
+    }
   }
 
   removeSource(id: string) {
-    const source = this.getSource(id);
+    const source = this.views.getSource(id);
 
     if (!source) throw new Error(`Source ${id} not found`);
 
@@ -208,17 +533,17 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
      * otherwise OBS thinks it's still attached
      * and won't release it. */
     if (source.channel !== void 0) {
-      obs.Global.setOutputSource(source.channel, null);
+      obs.Global.setOutputSource(source.channel, (null as unknown) as obs.ISource);
     }
 
-    this.REMOVE_SOURCE(id);
+    source.getObsInput().release();
     this.propertiesManagers[id].manager.destroy();
     delete this.propertiesManagers[id];
+    this.REMOVE_SOURCE(id);
     this.sourceRemoved.next(source.state);
-    source.getObsInput().release();
   }
 
-  addFile(path: string): Source {
+  addFile(path: string): Source | null {
     const realpath = fs.realpathSync(path);
     const SUPPORTED_EXT = {
       image_source: ['png', 'jpg', 'jpeg', 'tga', 'bmp'],
@@ -246,8 +571,10 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
 
     const types = Object.keys(SUPPORTED_EXT);
     for (const type of types) {
+      // TODO: index
+      // @ts-ignore
       if (!SUPPORTED_EXT[type].includes(ext)) continue;
-      let settings: Dictionary<TObsValue>;
+      let settings: Dictionary<TObsValue> | null = null;
       if (type === 'image_source') {
         settings = { file: path };
       } else if (type === 'browser_source') {
@@ -262,20 +589,20 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
           looping: true,
         };
       } else if (type === 'text_gdiplus') {
-        settings = { text: fs.readFileSync(path).toString() };
+        settings = {
+          read_from_file: true,
+          file: path,
+        };
       }
-      return this.createSource(filename, type as TSourceType, settings);
+      if (settings) return this.createSource(filename, type as TSourceType, settings);
     }
     return null;
   }
 
-  suggestName(name: string): string {
-    return namingHelpers.suggestName(name, (name: string) => this.getSourcesByName(name).length);
-  }
-
   private onSceneItemRemovedHandler(sceneItemState: ISceneItem) {
     // remove source if it has been removed from the all scenes
-    const source = this.getSource(sceneItemState.sourceId);
+    const source = this.views.getSource(sceneItemState.sourceId);
+    if (!source) return;
 
     if (source.type === 'scene') return;
 
@@ -283,28 +610,8 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     this.removeSource(source.sourceId);
   }
 
-  getObsSourceSettings(type: TSourceType, settings: Dictionary<any>): Dictionary<any> {
-    const resolvedSettings = cloneDeep(settings);
-
-    Object.keys(resolvedSettings).forEach(propName => {
-      // device_id is unique for each PC
-      // so we allow to provide a device name instead device id
-      // resolve the device id by the device name here
-      if (!['device_id', 'video_device_id', 'audio_device_id'].includes(propName)) return;
-
-      const device =
-        type === 'dshow_input'
-          ? this.hardwareService.getDshowDeviceByName(settings[propName])
-          : this.hardwareService.getDeviceByName(settings[propName]);
-
-      if (!device) return;
-      resolvedSettings[propName] = device.id;
-    });
-    return resolvedSettings;
-  }
-
   private getObsSourceCreateSettings(type: TSourceType, settings: Dictionary<any>) {
-    const resolvedSettings = this.getObsSourceSettings(type, settings);
+    const resolvedSettings = cloneDeep(settings);
 
     // setup default settings
     if (type === 'browser_source') {
@@ -314,19 +621,54 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
       }
     }
 
-    if (type === 'text_gdiplus') {
-      if (resolvedSettings.text === void 0) resolvedSettings.text = name;
+    if (type === 'smart_browser_source') {
+      resolvedSettings.__remappedType = 'browser_source';
+      resolvedSettings.webpage_control_level = 5;
+      resolvedSettings.propertiesManager = 'smart_browser_source';
+      resolvedSettings.url = '';
+      resolvedSettings.width = 1280;
+      resolvedSettings.height = 720;
     }
+
+    if (type === 'text_gdiplus') {
+      if (resolvedSettings.text === void 0) {
+        resolvedSettings.text = name;
+      }
+
+      // Note: this is the first attempt to add versioning to sources.
+      // In partucular, adding the version 3 for text solves the blurriness problem.
+      // And this approach allows to preserve older behavior for previously created sources.
+      // You can look into this commit as a reference.
+      // https://github.com/obsproject/obs-studio/commit/b2302902a3b3e1cce140a6417f4c5e490869a3f2
+      resolvedSettings.version = 3;
+    }
+
+    if (
+      type === 'dshow_input' &&
+      resolvedSettings.video_device_id === void 0 &&
+      this.defaultHardwareService.state.defaultVideoDevice
+    ) {
+      resolvedSettings.video_device_id = this.defaultHardwareService.state.defaultVideoDevice;
+    }
+
+    if (
+      type === 'macos_avcapture' &&
+      resolvedSettings.device === void 0 &&
+      this.defaultHardwareService.state.defaultVideoDevice
+    ) {
+      resolvedSettings.device = this.defaultHardwareService.state.defaultVideoDevice;
+    }
+
     return resolvedSettings;
   }
 
   getAvailableSourcesTypesList(): IObsListOption<TSourceType>[] {
     const obsAvailableTypes = obs.InputFactory.types();
-    const whitelistedTypes: IObsListOption<TSourceType>[] = [
+    const allowlistedTypes: IObsListOption<TSourceType>[] = [
       { description: 'Image', value: 'image_source' },
-      { description: 'Color Source', value: 'color_source' },
+      { description: 'Color Block', value: 'color_source' },
       { description: 'Browser Source', value: 'browser_source' },
-      { description: 'Media Source', value: 'ffmpeg_source' },
+      { description: 'Media File', value: 'ffmpeg_source' },
       { description: 'Image Slide Show', value: 'slideshow' },
       { description: 'Text (GDI+)', value: 'text_gdiplus' },
       { description: 'Text (FreeType 2)', value: 'text_ft2_source' },
@@ -339,55 +681,67 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
       { description: 'Blackmagic Device', value: 'decklink-input' },
       { description: 'NDI Source', value: 'ndi_source' },
       { description: 'OpenVR Capture', value: 'openvr_capture' },
+      { description: 'Screen Capture', value: 'screen_capture' },
+      { description: 'macOS Screen Capture', value: 'mac_screen_capture' },
       { description: 'LIV Client Capture', value: 'liv_capture' },
       { description: 'OvrStream', value: 'ovrstream_dc_source' },
       { description: 'VLC Source', value: 'vlc_source' },
+      { description: 'Audio Input Capture', value: 'coreaudio_input_capture' },
+      { description: 'Audio Output Capture', value: 'coreaudio_output_capture' },
+      { description: 'Video Capture Device', value: 'macos_avcapture' },
+      { description: 'Display Capture', value: 'display_capture' },
+      { description: 'Soundtrack source', value: 'soundtrack_source' },
+      { description: 'Collab Cam', value: 'mediasoupconnector' },
+      { description: 'Application Audio Capture (BETA)', value: 'wasapi_process_output_capture' },
+      { description: 'Spout2 capture', value: 'spout_capture' },
     ];
 
-    const availableWhitelistedType = whitelistedTypes.filter(type =>
+    const availableAllowlistedTypes = allowlistedTypes.filter(type =>
       obsAvailableTypes.includes(type.value),
     );
     // 'scene' is not an obs input type so we have to set it manually
-    availableWhitelistedType.push({ description: 'Scene', value: 'scene' });
-
-    return availableWhitelistedType;
+    availableAllowlistedTypes.push({ description: 'Scene', value: 'scene' });
+    availableAllowlistedTypes.push({
+      description: 'Reactive Source',
+      value: 'smart_browser_source',
+    });
+    return availableAllowlistedTypes;
   }
 
   getAvailableSourcesTypes(): TSourceType[] {
     return this.getAvailableSourcesTypesList().map(listItem => listItem.value);
   }
 
-  refreshSourceAttributes() {
-    const activeItems = this.scenesService.activeScene.getItems();
-    const sourcesNames: string[] = [];
+  /**
+   * Get all smart sources
+   * @remark Primarily used for updating the smart browser sources for forwarding socket events
+   * from the reactive data service. For performance optimization, filter smart sources before
+   * constructing the `Source`. This prevents hot paths while iterating through sources, which
+   * may happen frequently when forwarding events from reactive data to smart sources while live.
+   * @returns An array of all of the smart sources in the scene collection
+   */
+  getSmartSources() {
+    return Object.values(this.state.sources)
+      .filter(s => s.propertiesManagerType === 'smartBrowserSource')
+      .map(sourceModel => new Source(sourceModel.sourceId));
+  }
 
-    activeItems.forEach(activeItem => {
-      sourcesNames.push(activeItem.name);
-    });
-
-    const sourcesSize = obs.getSourcesSize(sourcesNames);
-
-    activeItems.forEach((item, index) => {
-      const source = this.state.sources[item.sourceId];
-
-      if (
-        source.width !== sourcesSize[index].width ||
-        source.height !== sourcesSize[index].height
-      ) {
-        const size = {
-          id: item.sourceId,
-          width: sourcesSize[index].width,
-          height: sourcesSize[index].height,
-        };
-        this.UPDATE_SOURCE(size);
-      }
-      this.updateSourceFlags(source, sourcesSize[index].outputFlags);
-    });
+  /**
+   * Confirm if a smart source exists
+   * @remark Primarily used for updating the smart browser sources for forwarding socket events
+   * from the reactive data service. For performance optimization, check for the existence of any
+   * smart sources.
+   * @returns A boolean indicating whether there are any smart sources in the scene collection
+   */
+  hasSmartSources() {
+    return Object.values(this.state.sources).some(
+      s => s.propertiesManagerType === 'smartBrowserSource',
+    );
   }
 
   private handleSourceCallback(objs: IObsSourceCallbackInfo[]) {
     objs.forEach(info => {
-      const source = this.getSource(info.name);
+      const source = this.views.getSource(info.name);
 
       // This is probably a transition or something else we don't care about
       if (!source) return;
@@ -395,27 +749,45 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
       if (source.width !== info.width || source.height !== info.height) {
         const size = { id: source.sourceId, width: info.width, height: info.height };
         this.UPDATE_SOURCE(size);
+        this.sourceUpdated.next(source.getModel());
       }
       this.updateSourceFlags(source, info.flags);
     });
   }
 
-  private updateSourceFlags(source: ISource, flags: number, doNotEmit?: boolean) {
+  private updateSourceFlags(source: Source, flags: number, doNotEmit?: boolean) {
     const audio = !!(AudioFlag & flags);
     const video = !!(VideoFlag & flags);
     const async = !!(AsyncFlag & flags);
     const doNotDuplicate = !!(DoNotDuplicateFlag & flags);
+    const forceUiRefresh = !!(ForceUiRefresh & flags);
 
-    if (source.audio !== audio || source.video !== video) {
-      this.UPDATE_SOURCE({ audio, video, async, doNotDuplicate, id: source.sourceId });
+    if (
+      source.audio !== audio ||
+      source.video !== video ||
+      source.forceUiRefresh !== forceUiRefresh
+    ) {
+      this.UPDATE_SOURCE({
+        audio,
+        video,
+        async,
+        doNotDuplicate,
+        forceUiRefresh,
+        id: source.sourceId,
+      });
 
-      if (!doNotEmit) this.sourceUpdated.next(source);
+      if (!doNotEmit) this.sourceUpdated.next(source.getModel());
     }
   }
 
   setMuted(id: string, muted: boolean) {
-    const source = this.getSource(id);
-    source.getObsInput().muted = muted;
+    const source = this.views.getSource(id);
+    if (!source) return;
+
+    // Only update in OBS if forceMuted is false
+    if (!source.forceMuted) {
+      source.getObsInput().muted = muted;
+    }
     this.UPDATE_SOURCE({ id, muted });
     this.sourceUpdated.next(source.state);
   }
@@ -424,108 +796,74 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     this.RESET_SOURCES();
   }
 
-  // Utility functions / getters
-
-  getSourceById(id: string): Source {
-    return this.getSource(id);
-  }
-
-  getSourcesByName(name: string): Source[] {
-    const sourceModels = Object.values(this.state.sources).filter(source => {
-      return source.name === name;
-    });
-    return sourceModels.map(sourceModel => this.getSource(sourceModel.sourceId));
-  }
-
-  get sources(): Source[] {
-    return Object.values(this.state.sources).map(sourceModel =>
-      this.getSource(sourceModel.sourceId),
-    );
-  }
-
-  getSource(id: string): Source {
-    return this.state.sources[id] || this.state.temporarySources[id] ? new Source(id) : void 0;
-  }
-
-  getSources() {
-    return this.sources;
+  /**
+   * DO NOT CALL THIS FUNCTION
+   * This is a plumbing function that allows properties managers to sync their
+   * settings into the Vuex store. It should not be called from anywhere outside
+   * the base PropertiesManager class.
+   */
+  updatePropertiesManagerSettingsInStore(sourceId: string, settings: Dictionary<any>) {
+    this.UPDATE_SOURCE({ id: sourceId, propertiesManagerSettings: settings });
   }
 
   showSourceProperties(sourceId: string) {
-    const source = this.getSource(sourceId);
+    const source = this.views.getSource(sourceId);
+    if (!source) return;
+
+    if (source.type === 'screen_capture') return this.showScreenCaptureProperties(source);
+    if (source.type === 'mediasoupconnector') return this.showGuestCamProperties(source);
+
     const propertiesManagerType = source.getPropertiesManagerType();
-    const isWidget = propertiesManagerType === 'widget';
 
-    // show a custom component for widgets below
-    const widgetsWhitelist = [
-      WidgetType.BitGoal,
-      WidgetType.DonationGoal,
-      WidgetType.FollowerGoal,
-      WidgetType.StarsGoal,
-      WidgetType.SupporterGoal,
-      WidgetType.ChatBox,
-      WidgetType.ViewerCount,
-      WidgetType.DonationTicker,
-      WidgetType.Credits,
-      WidgetType.EventList,
-      WidgetType.StreamBoss,
-      WidgetType.TipJar,
-      WidgetType.SubGoal,
-      WidgetType.MediaShare,
-      WidgetType.SponsorBanner,
-      WidgetType.AlertBox,
-    ];
-
-    if (isWidget && this.userService.isLoggedIn()) {
-      const widgetType = source.getPropertiesManagerSettings().widgetType;
-      if (widgetsWhitelist.includes(widgetType)) {
-        const componentName = this.widgetsService.getWidgetComponent(widgetType);
-
-        this.windowsService.showWindow({
-          componentName,
-          title: $t('Settings for ') + WidgetDisplayData()[widgetType].name,
-          queryParams: { sourceId },
-          size: {
-            width: 920,
-            height: 1024,
-          },
-        });
-
-        return;
-      }
-    }
-
-    // Figure out if we should redirect to settings
-    if (propertiesManagerType === 'platformApp') {
-      const settings = source.getPropertiesManagerSettings();
-      const app = this.platformAppsService.getApp(settings.appId);
-
-      if (app) {
-        const page = app.manifest.sources.find(appSource => {
-          return appSource.id === settings.appSourceId;
-        });
-
-        if (page && page.redirectPropertiesToTopNavSlot) {
-          this.navigationService.navigate('PlatformAppMainPage', {
-            appId: app.id,
-            sourceId: source.sourceId,
-          });
-
-          // If we navigated, we don't want to open source properties,
-          // and should close any open child windows instead
-          this.windowsService.closeChildWindow();
-          return;
-        }
-      }
-    }
+    if (propertiesManagerType === 'widget') return this.showWidgetProperties(source);
+    if (propertiesManagerType === 'platformApp') return this.showPlatformAppPage(source);
+    if (propertiesManagerType === 'iconLibrary') return this.showIconLibrarySettings(source);
 
     let propertiesName = SourceDisplayData()[source.type].name;
     if (propertiesManagerType === 'replay') propertiesName = $t('Instant Replay');
     if (propertiesManagerType === 'streamlabels') propertiesName = $t('Stream Label');
 
+    // uncomment the source type to use it's React version
+    const reactSourceProps: TSourceType[] = [
+      'color_source',
+      // 'image_source',
+      'browser_source',
+      // 'slideshow',
+      'ffmpeg_source',
+      // 'text_gdiplus',
+      // 'text_ft2_source',
+      // 'monitor_capture',
+      // 'window_capture',
+      'game_capture',
+      // 'dshow_input',
+      'dshow_input',
+      // 'wasapi_input_capture',
+      // 'wasapi_output_capture',
+      // 'decklink-input',
+      // 'scene',
+      // 'ndi_source',
+      'openvr_capture',
+      // 'screen_capture',
+      // 'liv_capture',
+      // 'ovrstream_dc_source',
+      // 'vlc_source',
+      // 'coreaudio_input_capture',
+      // 'coreaudio_output_capture',
+      // 'macos_avcapture',
+      // 'display_capture',
+      // 'audio_line',
+      // 'syphon-input',
+      // 'soundtrack_source',
+    ];
+
+    const componentName =
+      reactSourceProps.includes(source.type) && propertiesManagerType === 'default'
+        ? 'SourceProperties'
+        : 'SourcePropertiesDeprecated';
+
     this.windowsService.showWindow({
-      componentName: 'SourceProperties',
-      title: $t('Settings for ') + propertiesName,
+      componentName,
+      title: $t('Settings for %{sourceName}', { sourceName: propertiesName }),
       queryParams: { sourceId },
       size: {
         width: 600,
@@ -534,13 +872,133 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
     });
   }
 
+  showWidgetProperties(source: Source) {
+    if (!this.userService.isLoggedIn) return;
+    const platform = this.userService.views.platform;
+    assertIsDefined(platform);
+    const widgetType = source.getPropertiesManagerSettings().widgetType;
+
+    // Retired widgets still exist in saved scene collections but no longer have a
+    // settings window.
+    if (RETIRED_WIDGETS.includes(widgetType)) return;
+
+    const componentName = this.widgetsService.getWidgetComponent(widgetType);
+
+    // React widgets are in the WidgetsWindow component
+    const isReactComponent =
+      reactWidgets.includes(componentName as TWidgetType) &&
+      (!this.customizationService.state.legacyAlertbox || componentName !== 'AlertBox');
+    const windowComponentName = isReactComponent ? 'WidgetWindow' : componentName;
+
+    const defaultVueWindowSize = { width: 920, height: 1024 };
+    const defaultReactWindowSize = { width: 600, height: 800 };
+    // TODO: index
+    // @ts-ignore
+    const widgetInfo = this.widgetsService.widgetsConfig[WidgetType[componentName]];
+    const { width, height } = isReactComponent
+      ? widgetInfo.settingsWindowSize || defaultReactWindowSize
+      : defaultVueWindowSize;
+
+    if (componentName) {
+      this.windowsService.showWindow({
+        componentName: windowComponentName,
+        title: $t('Settings for %{sourceName}', {
+          sourceName: WidgetDisplayData(platform.type)[widgetType]?.name || componentName,
+        }),
+        queryParams: { sourceId: source.sourceId, widgetType: WidgetType[widgetType] },
+        size: {
+          width,
+          height,
+        },
+      });
+    }
+  }
+
+  showPlatformAppPage(source: Source) {
+    const settings = source.getPropertiesManagerSettings();
+    const app = this.platformAppsService.views.getApp(settings.appId);
+
+    if (app) {
+      const page = app.manifest.sources.find(appSource => {
+        return appSource.id === settings.appSourceId;
+      });
+
+      if (page && page.redirectPropertiesToTopNavSlot) {
+        this.navigationService.navigate('PlatformAppMainPage', {
+          appId: app.id,
+          sourceId: source.sourceId,
+        });
+
+        // If we navigated, we don't want to open source properties,
+        // and should close any open child windows instead
+        this.windowsService.closeChildWindow();
+        return;
+      }
+    }
+    this.windowsService.showWindow({
+      componentName: 'SourcePropertiesDeprecated',
+      title: $t('Settings for %{sourceName}', {
+        sourceName: SourceDisplayData()[source.type].name,
+      }),
+      queryParams: { sourceId: source.sourceId },
+      size: {
+        width: 600,
+        height: 800,
+      },
+    });
+  }
+
+  showIconLibrarySettings(source: Source) {
+    const propertiesName = SourceDisplayData()[source.type].name;
+    this.windowsService.showWindow({
+      componentName: 'IconLibraryProperties',
+      title: $t('Settings for %{sourceName}', { sourceName: propertiesName }),
+      queryParams: { sourceId: source.sourceId },
+      size: {
+        width: 400,
+        height: 600,
+      },
+    });
+  }
+
+  showScreenCaptureProperties(source: Source) {
+    const propertiesName = SourceDisplayData()[source.type].name;
+    this.windowsService.showWindow({
+      componentName: 'ScreenCaptureProperties',
+      title: $t('Settings for %{sourceName}', { sourceName: propertiesName }),
+      queryParams: { sourceId: source.sourceId },
+      size: {
+        width: 690,
+        height: 800,
+      },
+    });
+  }
+
+  showGuestCamProperties(source?: Source) {
+    this.windowsService.showWindow({
+      componentName: 'GuestCamProperties',
+      title: $t('Collab Cam Properties', { sourceName: $t('Collab Cam') }),
+      queryParams: { sourceId: source?.sourceId },
+      size: {
+        width: 850,
+        height: 660,
+      },
+    });
+  }
+
+  showGuestCamPropertiesBySourceId(sourceId: string) {
+    const source = this.views.getSource(sourceId);
+
+    if (source) this.showGuestCamProperties(source);
+  }
+
   showShowcase() {
     this.windowsService.showWindow({
-      componentName: 'SourcesShowcase',
+      componentName: 'SourceShowcase',
       title: $t('Add Source'),
       size: {
-        width: 1200,
-        height: 650,
+        width: 900,
+        height: 700,
       },
     });
   }
@@ -574,7 +1032,8 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
    * This function does nothing if the source is not a browser source.
    */
   showInteractWindow(sourceId: string) {
-    const source = this.getSourceById(sourceId);
+    const source = this.views.getSource(sourceId);
+    if (!source) return;
 
     if (source.type !== 'browser_source') return;
 
@@ -582,6 +1041,30 @@ export class SourcesService extends StatefulService<ISourcesState> implements IS
       componentName: 'BrowserSourceInteraction',
       queryParams: { sourceId },
       title: $t('Interact: %{sourceName}', { sourceName: source.name }),
+      size: {
+        width: 800,
+        height: 600,
+      },
+    });
+  }
+
+  showReactiveDataEditorWindow(sourceId?: string) {
+    if (!sourceId) return; // for now, require a source id
+
+    const source = this.views.getSource(sourceId);
+
+    if (!source) return;
+
+    if (source.propertiesManagerType !== 'smartBrowserSource') {
+      return;
+    }
+
+    const stateKeys = this.reactiveDataService.getStateKeysForSource(source.sourceId);
+
+    this.windowsService.showWindow({
+      componentName: 'ReactiveDataEditorWindow',
+      queryParams: { stateKeysOfInterest: stateKeys } as IReactiveDataEditorProps,
+      title: $t('Reactive Data Editor'),
       size: {
         width: 800,
         height: 600,

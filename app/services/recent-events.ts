@@ -1,15 +1,25 @@
 import { HostsService } from 'services/hosts';
-import { StatefulService, Inject, mutation } from 'services/core';
+import { StatefulService, Inject, mutation, InitAfter, ViewHandler } from 'services/core';
 import { UserService, LoginLifecycle } from 'services/user';
-import { authorizedHeaders, handleResponse } from 'util/requests';
+import { authorizedHeaders, handleResponse, jfetch } from 'util/requests';
 import { $t } from 'services/i18n';
 import { WindowsService } from 'services/windows';
-import { WebsocketService, TSocketEvent, IEventSocketEvent } from 'services/websocket';
+import {
+  WebsocketService,
+  TSocketEvent,
+  IEventSocketEvent,
+  ISafeModeEnabledSocketEvent,
+} from 'services/websocket';
+import cloneDeep from 'lodash/cloneDeep';
+import pick from 'lodash/pick';
+import uuid from 'uuid/v4';
+import { Subject, Subscription } from 'rxjs';
+import mapValues from 'lodash/mapValues';
+import { WidgetsService, WidgetType } from './widgets';
 
 export interface IRecentEvent {
-  id: number;
-  name: string;
-  from: string;
+  name?: string;
+  from?: string;
   type: string;
   platform: string;
   created_at: string;
@@ -23,7 +33,9 @@ export interface IRecentEvent {
   host_type?: 'manual' | 'auto';
   raiders?: number;
   formatted_amount?: string;
+  formattedAmount?: string;
   sub_plan?: string;
+  sub_type?: string;
   months?: number;
   streak_months?: number;
   gifter?: string;
@@ -33,11 +45,126 @@ export interface IRecentEvent {
   displayString?: string;
   comment?: string;
   title?: string;
+  iso8601Created?: string;
+  createdAt?: string;
+  streamer?: string;
+  giftType?: string;
+  _id?: string;
+  read: boolean;
+  hash: string;
+  isTest?: boolean;
+  isPreview?: boolean;
+  repeat?: boolean;
+  // uuid is local and will NOT persist across app restarts/ fetches
+  uuid: string;
+  skill_amount?: string;
+  sender_name?: string;
+  skill_currency?: string;
+  skill_name?: string;
+  recurring_donation?: { id: string; months?: number };
+  redeemer_display_name?: string;
+  power_up_name?: string;
+  power_up_prompt?: string;
+}
+
+interface IRecentEventsConfig {
+  eventsPanelMuted: boolean;
+  settings: IRecentEventFilterConfig;
+}
+
+interface IRecentEventFilterConfig {
+  donation: boolean;
+  merch: boolean;
+  // Twitch
+  follow?: boolean;
+  subscription?: boolean;
+  subscription_tier_1?: boolean;
+  subscription_tier_2?: boolean;
+  subscription_tier_3?: boolean;
+  filter_subscription_3_months?: boolean;
+  filter_subscription_6_months?: boolean;
+  filter_subscription_9_months?: boolean;
+  filter_subscription_12_months?: boolean;
+  filter_subscription_minimum_enabled?: boolean;
+  filter_subscription_minimum_months?: number;
+  primesub?: boolean;
+  resub?: boolean;
+  resub_tier_1?: boolean;
+  resub_tier_2?: boolean;
+  resub_tier_3?: boolean;
+  resub_prime?: boolean;
+  gifted_sub?: boolean;
+  gifted_sub_tier_1?: boolean;
+  gifted_sub_tier_2?: boolean;
+  gifted_sub_tier_3?: boolean;
+  host?: boolean;
+  bits?: boolean;
+  power_up?: boolean;
+  raid?: boolean;
+  // YouTube
+  subscriber?: boolean;
+  sponsor?: boolean;
+  superchat?: boolean;
+  // Mixer
+  sticker?: boolean;
+  effect?: boolean;
+  // Kick
+  kick_follow?: boolean;
+  kick_kicks?: boolean;
+  kick_subscription?: boolean;
+  kick_subscription_gifts?: boolean;
+  twitter_follow?: boolean;
+  twitter_subscription?: boolean;
+  twitter_like?: boolean;
+  twitter_repost?: boolean;
+  // Facebook Live
+  facebook_support?: boolean;
+  facebook_like?: boolean;
+  facebook_share?: boolean;
+  facebook_stars?: boolean;
+}
+
+interface ISafeModeSettings {
+  enabled: boolean;
+  loading: boolean;
+  clearChat: boolean;
+  clearQueuedAlerts: boolean;
+  clearRecentEvents: boolean;
+  disableChatAlerts: boolean;
+  disableFollowerAlerts: boolean;
+  emoteOnly: boolean;
+  followerOnly: boolean;
+  subOnly: boolean;
+  enableTimer: boolean;
+  timeInMinutes: number;
 }
 
 interface IRecentEventsState {
   recentEvents: IRecentEvent[];
   muted: boolean;
+  enableChatNotifs: boolean;
+  mediaShareEnabled: boolean;
+  filterConfig: IRecentEventFilterConfig;
+  queuePaused: boolean;
+  safeMode: ISafeModeSettings;
+}
+
+export interface ISafeModeServerSettings {
+  clear_chat: boolean;
+  clear_queued_alerts: boolean;
+  clear_recent_events: boolean;
+  disable_chat_alerts: boolean;
+  disable_follower_alerts: boolean;
+  emote_only: boolean;
+  follower_only: boolean;
+  sub_only: boolean;
+  enable_timer: boolean;
+  time_in_minutes: number;
+}
+
+enum ESafeModeStatus {
+  Enabled = 'enabled',
+  Disabled = 'disabled',
 }
 
 const subscriptionMap = (subPlan: string) => {
@@ -49,22 +176,137 @@ const subscriptionMap = (subPlan: string) => {
   }[subPlan];
 };
 
+const filterName = (key: string): string => {
+  return {
+    donation: $t('Donations'),
+    redemption: $t('Redemptions'),
+    merch: $t('Merch'),
+    follow: $t('Follows'),
+    subscription: $t('Subs'),
+    subscription_tier_1: $t('Tier 1'),
+    subscription_tier_2: $t('Tier 2'),
+    subscription_tier_3: $t('Tier 3'),
+    filter_subscription_3_months: $t('3 Months'),
+    filter_subscription_6_months: $t('6 Months'),
+    filter_subscription_9_months: $t('9 Months'),
+    filter_subscription_12_months: $t('12 Months'),
+    filter_subscription_minimum_enabled: $t('Min. Months'),
+    primesub: $t('Prime'),
+    resub: $t('Resubs'),
+    resub_tier_1: $t('Tier 1'),
+    resub_tier_2: $t('Tier 2'),
+    resub_tier_3: $t('Tier 3'),
+    resub_prime: $t('Prime'),
+    gifted_sub: $t('Gifted'),
+    bits: $t('Bits'),
+    power_up: $t('Power-Ups'),
+    raid: $t('Raids'),
+    subscriber: $t('Subscribers'),
+    sponsor: $t('Members'),
+    superchat: $t('Super Chats'),
+    sticker: $t('Stickers'),
+    effect: $t('Effects'),
+    kick_kicks: $t('Kicks'),
+    kick_follow: $t('Follows'),
+    kick_subscription: $t('Subs'),
+    kick_subscription_gifts: $t('Gifted'),
+    twitter_follow: $t('X Follows'),
+    twitter_subscription: $t('X Subscriptions'),
+    twitter_like: $t('X Likes'),
+    twitter_repost: $t('X Reposts'),
+    facebook_support: $t('Supports'),
+    facebook_like: $t('Likes'),
+    facebook_share: $t('Shares'),
+    facebook_stars: $t('Stars'),
+  }[key];
+};
+
+function getRecentEventType(event: IEventSocketEvent): string {
+  if (event.for === 'kick_account') {
+    return `kick_${event.type}`;
+  }
+  if (event.for === 'twitter_account') {
+    return `twitter_${event.type}`;
+  }
+  if (event.type === 'powerUp') {
+    return 'power_up';
+  }
+  return event.type;
+}
+
+/**
+ * This function duplicates per-event logic from streamlabs.com for
+ * creating cache keys used in fetching read status of events and
+ * serves as the best proxy for a unique identifier for each
+ * event. Should be refactored when backend is rewritten for consistency
+ */
+function getHashForRecentEvent(event: IRecentEvent) {
+  switch (event.type) {
+    case 'donation':
+    case 'bits':
+    case 'donordrivedonation':
+    case 'eldonation':
+    case 'justgivingdonation':
+    case 'kick_kicks':
+    case 'pledge':
+    case 'superheart':
+    case 'tiltifydonation':
+    case 'stars':
+      return [
+        event.type,
+        event.name,
+        event.message,
+        event.amount ? parseInt(event.amount, 10) : 0,
+      ].join(':');
+    case 'follow':
+    case 'kick_follow':
+    case 'loyalty_store_redemption':
+    case 'redemption':
+    case 'superchat':
+      return [event.type, event.from, event.message].join(':');
+    case 'like':
+    case 'share':
+    case 'support':
+      return [event.type, event.name, event._id].join(':');
+    case 'power_up':
+      return [event.type, event.redeemer_display_name, event.power_up_name].join(':');
+    case 'prime_sub_gift':
+      return [event.type, event.name, event.streamer, event.giftType].join(':');
+    case 'sticker':
+      return [event.name, event.type, event.currency].join(':');
+    case 'raid':
+      return [event.type, event.name, event.from].join(':');
+    case 'subscription':
+    case 'kick_subscription':
+    case 'kick_subscription_gifts':
+      return [event.type, event.name?.toLowerCase(), event.message].join(':');
+    case 'treat':
+      return [event.type, event.name, event.title, event.message, event.createdAt].join(':');
+    case 'merch':
+      return [event.type, event.message, event.createdAt].join(':');
+    default:
+      return [event.type, event._id].join(':');
+  }
+}
+
 const SUPPORTED_EVENTS = [
   'merch',
   'donation',
-  'facemaskdonation',
+  'streamlabscharitydonation',
   'follow',
   'subscription',
   'bits',
-  'host',
-  'raid',
+  'powerUp',
   'sticker',
   'effect',
   'like',
+  'repost',
+  'raid',
   'stars',
   'support',
   'share',
   'superchat',
+  'kicks',
   'pledge',
   'eldonation',
   'tiltifydonation',
@@ -73,64 +315,329 @@ const SUPPORTED_EVENTS = [
   'treat',
 ];
 
+class RecentEventsViews extends ViewHandler<IRecentEventsState> {
+  @Inject() private widgetsService: WidgetsService;
+  getEventString(event: IRecentEvent) {
+    return {
+      donation: this.getDonoString(event),
+      merch: $t('has purchased %{product} from the store', { product: event.product }),
+      streamlabscharitydonation: $t('has donated via Streamlabs Charity'),
+      follow: event.platform === 'youtube_account' ? $t('has subscribed') : $t('has followed'),
+      subscription: this.getSubString(event),
+      // Twitch
+      bits: $t('has used'),
+      power_up: $t('has redeemed'),
+      raid: $t('has raided you with a party of %{viewers}', { viewers: event.raiders }),
+      // Mixer
+      sticker: $t('has used %{skill} for', { skill: event.skill }),
+      effect: $t('has used %{skill} for', { skill: event.skill }),
+      // Kick
+      kick_follow: $t('has followed'),
+      kick_kicks: $t('has used'),
+      kick_subscription: this.getSubString(event),
+      kick_subscription_gifts: this.getSubString(event),
+      // X
+      twitter_follow: $t('has followed'),
+      twitter_subscription: $t('has subscribed'),
+      twitter_like: $t('has liked'),
+      twitter_repost: $t('has reposted'),
+      // Facebook
+      like: $t('has liked'),
+      stars: $t('has used'),
+      support: this.getSubString(event),
+      share: $t('has shared'),
+      // Youtube
+      superchat: $t('has superchatted'),
+      // Integrations
+      pledge: $t('has pledged on Patreon'),
+      eldonation: $t('has donated to Extra Life'),
+      tiltifydonation: $t('has donated to Tiltify'),
+      donordrivedonation: $t('has donated to Donor Drive'),
+      justgivingdonation: $t('has donated to Just Giving'),
+      treat: $t('has given a treat %{title}', { title: event.title }),
+    }[event.type];
+  }
+
+  getDonoString(event: IRecentEvent) {
+    if (event.crate_item) {
+      return $t('has tipped with %{itemName}', { itemName: event.crate_item.name });
+    }
+    if (event.recurring_donation?.months > 1) {
+      return $t('has tipped %{months} months in a row', {
+        months: event.recurring_donation.months,
+      });
+    }
+    if (event.recurring_donation) {
+      return $t('has set up a monthly tip');
+    }
+    return $t('has tipped');
+  }
+  getSubString(event: IRecentEvent) {
+    if (event.platform === 'facebook_account') {
+      if (event.months > 1) {
+        return $t('has been a supporter for %{months} months', { months: event.months });
+      }
+      return $t('has become a supporter');
+    } else if (event.platform === 'youtube_account') {
+      if (event.months > 1) {
+        return $t('has been a member for %{months} months', { months: event.months });
+      }
+      return $t('has become a member');
+    } else if (event.platform === 'kick_account') {
+      if (event.months > 1) {
+        return $t('has resubscribed for %{months} months', { months: event.months });
+      }
+      if (event.gifter) {
+        return $t('has gifted a sub to');
+      }
+      return $t('has subscribed');
+    }
+
+    if (event.gifter) {
+      return $t('has gifted a sub (%{tier}) to', {
+        tier: subscriptionMap(event.sub_plan),
+      });
+    }
+    if (event.months > 1 && event.streak_months && event.streak_months > 1) {
+      return $t('has resubscribed (%{tier}) for %{streak} months in a row! (%{months} total)', {
+        tier: subscriptionMap(event.sub_plan),
+        streak: event.streak_months,
+        months: event.months,
+      });
+    }
+    if (event.months > 1) {
+      return $t('has resubscribed (%{tier}) for %{months} months', {
+        tier: subscriptionMap(event.sub_plan),
+        months: event.months,
+      });
+    }
+    if (event.sub_type === 'primepaidupgrade') {
+      return $t('has converted from a Prime Gaming sub to a %{tier} sub', {
+        tier: subscriptionMap(event.sub_plan),
+      });
+    }
+    return $t('has subscribed (%{tier})', { tier: subscriptionMap(event.sub_plan) });
+  }
+
+  getEvent(uuid: string) {
+    return this.state.recentEvents.find(event => {
+      return event.uuid === uuid;
+    });
+  }
+
+  get spinWheelExists(): boolean {
+    return !!this.widgetsService.views.widgetSources.find(
+      source => source.type === WidgetType.SpinWheel,
+    );
+  }
+}
+
+@InitAfter('UserService')
 export class RecentEventsService extends StatefulService<IRecentEventsState> {
   @Inject() private hostsService: HostsService;
   @Inject() private userService: UserService;
   @Inject() private windowsService: WindowsService;
   @Inject() private websocketService: WebsocketService;
 
-  static initialState: IRecentEventsState = { recentEvents: [], muted: false };
+  safeModeStatusChanged = new Subject<ESafeModeStatus>();
+
+  static initialState: IRecentEventsState = {
+    recentEvents: [],
+    muted: false,
+    enableChatNotifs: false,
+    mediaShareEnabled: false,
+    filterConfig: {
+      donation: false,
+      merch: false,
+    },
+    queuePaused: false,
+    safeMode: {
+      enabled: false,
+      loading: false,
+      clearChat: true,
+      clearQueuedAlerts: true,
+      clearRecentEvents: true,
+      disableChatAlerts: true,
+      disableFollowerAlerts: true,
+      emoteOnly: true,
+      followerOnly: true,
+      subOnly: true,
+      enableTimer: false,
+      timeInMinutes: 60,
+    },
+  };
+
+  get views() {
+    return new RecentEventsViews(this.state);
+  }
 
   lifecycle: LoginLifecycle;
+  socketConnection: Subscription = null;
 
-  async initialize() {
+  async init() {
     this.lifecycle = await this.userService.withLifecycle({
       init: this.syncEventsState,
-      destroy: () => Promise.resolve(),
+      destroy: () => Promise.resolve(this.onLogout()),
       context: this,
     });
   }
 
-  syncEventsState() {
+  async syncEventsState() {
+    const config = await this.fetchConfig();
+    if (config) this.applyConfig(config);
     this.formEventsArray();
-    this.websocketService.socketEvent.subscribe(this.onSocketEvent.bind(this));
-    return this.fetchMutedState();
+    this.fetchMediaShareState();
+    this.subscribeToSocketConnection();
+    this.fetchSafeModeStatus();
+    this.fetchMuteChatNotifs();
   }
 
-  fetchRecentEvents(): Promise<{ data: Dictionary<IRecentEvent> }> {
-    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/recentevents/${
-      this.userService.widgetToken
-    }`;
+  subscribeToSocketConnection() {
+    this.socketConnection = this.websocketService.socketEvent.subscribe(ev =>
+      this.onSocketEvent(ev),
+    );
+  }
+
+  unsubscribeFromSocketConnection() {
+    if (this.socketConnection) this.socketConnection.unsubscribe();
+  }
+
+  onLogout() {
+    this.SET_RECENT_EVENTS([]);
+    this.unsubscribeFromSocketConnection();
+  }
+
+  shutdown() {
+    this.unsubscribeFromSocketConnection();
+  }
+
+  fetchRecentEvents() {
+    const typeString = this.getEventTypesString();
+    // eslint-disable-next-line
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/recentevents/${this.userService.widgetToken}?types=${typeString}`;
     const headers = authorizedHeaders(this.userService.apiToken);
     const request = new Request(url, { headers });
-    return fetch(request)
-      .then(handleResponse)
-      .catch(() => null);
+    return jfetch<{ data: Dictionary<IRecentEvent[]> }>(request).catch(() => {
+      console.warn('Error fetching recent events');
+    });
   }
 
-  fetchMutedState() {
-    const url = `https://${
-      this.hostsService.streamlabs
-    }/api/v5/slobs/widget/config?widget=recent_events`;
+  async fetchConfig() {
+    // eslint-disable-next-line
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/config?widget=recent_events`;
     const headers = authorizedHeaders(this.userService.apiToken);
-    return fetch(new Request(url, { headers }))
-      .then(handleResponse)
-      .then(resp => this.SET_MUTED(resp.eventsPanelMuted));
+    return jfetch<IRecentEventsConfig>(url, { headers }).catch(() => {
+      console.warn('Error fetching recent events config');
+    });
+  }
+
+  fetchMediaShareState() {
+    // eslint-disable-next-line
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/config?widget=media-sharing`;
+    const headers = authorizedHeaders(this.userService.apiToken);
+    return jfetch<{ settings: { advanced_settings: { enabled: boolean } } }>(url, {
+      headers,
+    }).then(resp => this.SET_MEDIA_SHARE(resp.settings.advanced_settings.enabled));
+  }
+
+  refresh() {
+    return this.formEventsArray();
   }
 
   private async formEventsArray() {
     const events = await this.fetchRecentEvents();
     let eventArray: IRecentEvent[] = [];
-    if (!events.data) return;
+    if (
+      !events ||
+      !events.data ||
+      (this.state.safeMode.enabled && this.state.safeMode.clearRecentEvents)
+    ) {
+      return;
+    }
     Object.keys(events.data).forEach(key => {
-      eventArray = eventArray.concat(events.data[key]);
+      const fortifiedEvents = events.data[key].map(event => {
+        event.hash = getHashForRecentEvent(event);
+        event.uuid = uuid();
+        return event;
+      });
+
+      // This server response returns a ton of stuff. We remove the noise
+      // before adding it to the store.
+      const culledEvents = fortifiedEvents.map(event => {
+        return pick(event, [
+          'name',
+          'from',
+          'type',
+          'platform',
+          'created_at',
+          'display_name',
+          'from_display_name',
+          'amount',
+          'crate_item',
+          'message',
+          'product',
+          'viewers',
+          'host_type',
+          'raiders',
+          'formatted_amount',
+          'sub_plan',
+          'sub_type',
+          'months',
+          'streak_months',
+          'gifter',
+          'currency',
+          'skill',
+          'since',
+          'displayString',
+          'comment',
+          'title',
+          'read',
+          'hash',
+          'uuid',
+          'power_up_name',
+          'power_up_prompt',
+        ]);
+      });
+
+      eventArray = eventArray.concat(culledEvents);
+    });
+
+    // Format string of keys to look for in server event cache
+    const hashValues = eventArray.map(event => event.hash).join('|##|');
+
+    // Get read status for all events
+    const readReceipts = await this.fetchReadReceipts(hashValues);
+    eventArray.forEach(event => {
+      // TODO: index
+      // @ts-ignore
+      event.read = readReceipts[event.hash] ? readReceipts[event.hash] : false;
+
+      // Events older than 1 month are treated as read
+      if (new Date(event.created_at).getTime() < new Date().getTime() - 1000 * 60 * 60 * 24 * 30) {
+        event.read = true;
+      }
     });
 
     eventArray.sort((a: IRecentEvent, b: IRecentEvent) => {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 
+    if (this.state.safeMode.enabled && this.state.safeMode.clearRecentEvents) return;
+
     this.SET_RECENT_EVENTS(eventArray);
+  }
+
+  async fetchReadReceipts(hashValues: string): Promise<{ data: Dictionary<boolean> }> {
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/readreceipts`;
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const request = new Request(url, { headers });
+    const body = JSON.stringify({
+      hashValues,
+    });
+    return await jfetch(url, { headers, body, method: 'POST' });
   }
 
   async repeatAlert(event: IRecentEvent) {
@@ -145,6 +652,33 @@ export class RecentEventsService extends StatefulService<IRecentEventsState> {
       token: this.userService.widgetToken,
     });
     return await fetch(new Request(url, { headers, body, method: 'POST' })).then(handleResponse);
+  }
+
+  async readAlert(event: IRecentEvent) {
+    this.TOGGLE_RECENT_EVENT_READ(event.uuid);
+    const newEvent = this.views.getEvent(event.uuid);
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/readalert`;
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const body = JSON.stringify({
+      eventHash: newEvent.hash,
+      read: newEvent.read,
+    });
+    const request = new Request(url, { headers, body, method: 'POST' });
+    return await fetch(request).then(handleResponse);
+  }
+
+  async postUpdateFilterPreferences() {
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/recentevents`;
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const body = JSON.stringify(this.state.filterConfig);
+    const request = new Request(url, { headers, body, method: 'POST' });
+    return await fetch(request).then(handleResponse);
   }
 
   async skipAlert() {
@@ -168,66 +702,311 @@ export class RecentEventsService extends StatefulService<IRecentEventsState> {
     return fetch(request).then(handleResponse);
   }
 
-  getSubString(event: IRecentEvent) {
-    if (event.gifter) {
-      return $t('has gifted a sub (%{tier}) to', {
-        tier: subscriptionMap(event.sub_plan),
-      });
-    }
-    if (event.months > 1) {
-      return $t('has resubscribed (%{tier}) for %{streak} months in a row! (%{months} total)', {
-        tier: subscriptionMap(event.sub_plan),
-        streak: event.streak_months,
-        months: event.months,
-      });
-    }
-    if (event.platform === 'youtube') {
-      return $t('has sponsored since %{date}', { date: event.since });
-    }
-    return $t('has subscribed (%{tier})', { tier: subscriptionMap(event.sub_plan) });
+  get filters() {
+    const mainFilters = pick(this.state.filterConfig, [
+      'donation',
+      'merch',
+      'follow',
+      'host',
+      'bits',
+      'power_up',
+      'raid',
+      'subscriber',
+      'sponsor',
+      'superchat',
+      'sticker',
+      'effect',
+      'kick_follow',
+      'kick_kicks',
+      'kick_subscription',
+      'twitter_follow',
+      'twitter_subscription',
+      'twitter_like',
+      'twitter_repost',
+      'facebook_support',
+      'facebook_like',
+      'facebook_share',
+      'facebook_stars',
+    ]);
+
+    const subFilters = pick(this.state.filterConfig, [
+      'subscription',
+      'subscription_tier_1',
+      'subscription_tier_2',
+      'subscription_tier_3',
+      'primesub',
+      'gifted_sub',
+      'kick_subscription_gifts',
+    ]);
+
+    const resubFilters = pick(this.state.filterConfig, [
+      'resub',
+      'resub_tier_1',
+      'resub_tier_2',
+      'resub_tier_3',
+      'resub_prime',
+      'filter_subscription_3_months',
+      'filter_subscription_6_months',
+      'filter_subscription_9_months',
+      'filter_subscription_12_months',
+      'filter_subscription_minimum_enabled',
+    ]);
+
+    const minimumMonths = pick(this.state.filterConfig, ['filter_subscription_minimum_months']);
+
+    const main = mapValues(mainFilters, (value, key) => {
+      return {
+        value,
+        name: filterName(key),
+      };
+    });
+
+    const sub = mapValues(subFilters, (value, key) => {
+      return {
+        value,
+        name: filterName(key),
+      };
+    });
+
+    const resub = mapValues(resubFilters, (value, key) => {
+      return {
+        value,
+        name: filterName(key),
+      };
+    });
+
+    const minMonths = mapValues(minimumMonths, (value, key) => {
+      return {
+        value,
+        name: filterName(key),
+      };
+    });
+
+    return {
+      main,
+      sub,
+      resub,
+      minMonths,
+    };
+  }
+
+  updateFilterPreference(key: string, value: boolean | number) {
+    this.SET_SINGLE_FILTER_CONFIG(key, value);
+    this.postUpdateFilterPreferences().then(() => {
+      this.formEventsArray();
+    });
+  }
+
+  getEventTypesString() {
+    return (
+      Object.keys(this.state.filterConfig)
+        // TODO: index
+        // @ts-ignore
+        .filter((type: string) => this.state.filterConfig[type] === true)
+        .join(',')
+    );
+  }
+
+  applyConfig(config: IRecentEventsConfig) {
+    if (!config) return;
+    this.SET_MUTED(config.eventsPanelMuted);
+    this.SET_FILTER_CONFIG(config.settings);
   }
 
   onSocketEvent(e: TSocketEvent) {
+    if (e.type === 'eventsPanelSettingsUpdate') {
+      if (e.message.muted != null) {
+        this.SET_MUTED(e.message.muted);
+      }
+    }
+
+    if (e.type === 'pauseQueue') {
+      this.SET_PAUSED(true);
+    }
+
+    if (e.type === 'unpauseQueue') {
+      this.SET_PAUSED(false);
+    }
+
+    if (e.type === 'mediaSharingSettingsUpdate') {
+      if (e.message.advanced_settings.enabled != null) {
+        this.SET_MEDIA_SHARE(e.message.advanced_settings.enabled);
+      }
+    }
+
+    if (e.type === 'safeModeEnabled') {
+      this.updateSafeModeSettingsFromServer(e.message);
+      this.onSafeModeEnabled(e.message.ends_at);
+    }
+
+    if (e.type === 'safeModeDisabled') {
+      this.onSafeModeDisabled();
+    }
+
     if (SUPPORTED_EVENTS.includes(e.type)) {
       this.onEventSocket(e as IEventSocketEvent);
     }
   }
 
-  onEventSocket(e: IEventSocketEvent) {
-    e.message.forEach((msg: IRecentEvent) => (msg.type = e.type));
-    this.ADD_RECENT_EVENT(e.message);
+  shouldFilterSubscription(event: IRecentEvent) {
+    if (!this.state.filterConfig.subscription) {
+      return false;
+    }
+
+    if (!this.state.filterConfig.subscription_tier_1 && event.sub_plan.toString() === '1000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.subscription_tier_2 && event.sub_plan.toString() === '2000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.subscription_tier_3 && event.sub_plan.toString() === '3000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.primesub && event.sub_plan.toString() === 'Prime') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.gifted_sub && event.gifter) {
+      return false;
+    }
+
+    return true;
   }
 
-  getEventString(event: IRecentEvent) {
-    return {
-      donation:
-        $t('has donated') +
-        (event.crate_item ? $t(' with %{name}', { name: event.crate_item.name }) : ''),
-      merch: $t('has purchased %{product} from the store', { product: event.product }),
-      follow: $t('has followed'),
-      subscription: this.getSubString(event),
-      // Twitch
-      bits: $t('has used'),
-      host: $t('has hosted you with %{viewers} viewers', { viewers: event.viewers }),
-      raid: $t('has raided you with a party of %{viewers}', { viewers: event.raiders }),
-      // Mixer
-      sticker: $t('has used %{skill} for', { skill: event.skill }),
-      effect: $t('has used %{skill} for', { skill: event.skill }),
-      // Facebook
-      like: $t('has liked'),
-      stars: $t('has used'),
-      support: $t('has supported for %{mounths} months', { months: event.months }),
-      share: $t('has shared'),
-      // Youtube
-      superchat: $t('has superchatted'),
-      // Integrations
-      pledge: $t('has pledged on Patreon'),
-      eldonation: $t('has donated to ExtraLife'),
-      tiltifydonation: $t('has donated to Tiltify'),
-      donordrivedonation: $t('has donated to Donor Drive'),
-      justgivingdonation: $t('has donated to Just Giving'),
-      treat: $t('has given a treat %{title}', { title: event.title }),
-    }[event.type];
+  shouldFilterResub(event: IRecentEvent) {
+    if (!this.state.filterConfig.resub) {
+      return false;
+    }
+
+    if (!this.state.filterConfig.resub_tier_1 && event.sub_plan.toString() === '1000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.resub_tier_2 && event.sub_plan.toString() === '2000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.resub_tier_3 && event.sub_plan.toString() === '3000') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.resub_prime && event.sub_plan.toString() === 'Prime') {
+      return false;
+    }
+
+    if (!this.state.filterConfig.gifted_sub && event.gifter) {
+      return false;
+    }
+
+    if (
+      this.state.filterConfig.filter_subscription_minimum_enabled &&
+      event.months < this.state.filterConfig.filter_subscription_minimum_months
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  isAllowed(event: IRecentEvent) {
+    if (this.state.safeMode.enabled) {
+      if (['follow', 'twitter_follow', 'host'].includes(event.type)) return false;
+    }
+
+    // Handle Twitter events separately since they are prefixed with `twitter_`.
+    if (event.platform === 'twitter_account' && event.type.startsWith('twitter_')) {
+      return !!this.state.filterConfig[event.type as keyof IRecentEventFilterConfig];
+    }
+
+    if (event.type === 'subscription' && this.userService.platform.type !== 'youtube') {
+      if (event.months > 1) {
+        return this.shouldFilterResub(event);
+      }
+      return this.shouldFilterSubscription(event);
+    }
+    // TODO: index
+    // @ts-ignore
+    return this.transformFilterForPlatform()[event.type];
+  }
+
+  transformFilterForPlatform() {
+    const filterMap = cloneDeep(this.state.filterConfig);
+    // TODO: index
+    // @ts-ignore
+    filterMap['support'] = filterMap['facebook_support'];
+    // TODO: index
+    // @ts-ignore
+    filterMap['like'] = filterMap['facebook_like'];
+    // TODO: index
+    // @ts-ignore
+    filterMap['share'] = filterMap['facebook_share'];
+    // TODO: index
+    // @ts-ignore
+    filterMap['stars'] = filterMap['facebook_stars'];
+    if (this.userService.platform.type === 'youtube') {
+      // TODO: index
+      // @ts-ignore
+      filterMap['subscription'] = filterMap['membership_level_1'];
+      filterMap['follow'] = filterMap['subscriber'];
+    }
+    return filterMap;
+  }
+
+  onEventSocket(e: IEventSocketEvent) {
+    const messages = e.message
+      .filter(msg => !msg.isTest && !msg.isPreview && !msg.repeat)
+      .map(msg => {
+        msg.platform = e.for;
+        msg.type = getRecentEventType(e);
+        msg.hash = getHashForRecentEvent(msg);
+        msg.uuid = uuid();
+        msg.read = false;
+        msg.iso8601Created = new Date().toISOString();
+        if (msg.type === 'sticker' || msg.type === 'effect') {
+          msg.amount = msg.skill_amount;
+          msg.name = msg.sender_name;
+          msg.currency = msg.skill_currency;
+          msg.skill = msg.skill_name;
+        }
+        return msg;
+      })
+      .filter(msg => this.isAllowed(msg));
+
+    this.ADD_RECENT_EVENT(messages);
+  }
+
+  async toggleMuteChatNotifs() {
+    const val = !this.state.enableChatNotifs;
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const url = `https://${this.hostsService.streamlabs}/api/v5/widgets/desktop/chat-box/notifications`;
+    const body = JSON.stringify({ enable: val });
+    try {
+      await jfetch(new Request(url, { headers, body, method: 'POST' }));
+      this.SET_MUTE_CHAT_NOTIFS(val);
+    } catch (e: unknown) {
+      return;
+    }
+  }
+
+  async fetchMuteChatNotifs() {
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const url = `https://${this.hostsService.streamlabs}/api/v5/widgets/desktop/chat-box`;
+    try {
+      const resp = await jfetch<any>(new Request(url, { headers, method: 'GET' }));
+      if (!resp?.data?.settings) return;
+      this.SET_MUTE_CHAT_NOTIFS(resp.settings.global?.alert_enabled);
+    } catch (e: unknown) {
+      return;
+    }
   }
 
   async toggleMuteEvents() {
@@ -235,13 +1014,15 @@ export class RecentEventsService extends StatefulService<IRecentEventsState> {
       this.userService.apiToken,
       new Headers({ 'Content-Type': 'application/json' }),
     );
-    const url = `https://${
-      this.hostsService.streamlabs
-    }/api/v5/slobs/widget/recentevents/eventspanel`;
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/recentevents/eventspanel`;
     const body = JSON.stringify({ muted: !this.state.muted });
-    return await fetch(new Request(url, { headers, body, method: 'POST' }))
-      .then(handleResponse)
-      .then(() => this.SET_MUTED(!this.state.muted));
+    return await fetch(new Request(url, { headers, body, method: 'POST' })).then(handleResponse);
+  }
+
+  async toggleQueue() {
+    try {
+      this.state.queuePaused ? await this.unpauseAlertQueue() : await this.pauseAlertQueue();
+    } catch (e: unknown) {}
   }
 
   openRecentEventsWindow(isMediaShare?: boolean) {
@@ -256,9 +1037,170 @@ export class RecentEventsService extends StatefulService<IRecentEventsState> {
     );
   }
 
+  showFilterMenu() {
+    this.windowsService.showWindow({
+      componentName: 'EventFilterMenu',
+      title: $t('Event Filters'),
+      queryParams: {},
+      size: {
+        width: 450,
+        height: 480,
+      },
+    });
+  }
+
+  async spinWheel() {
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/widget/wheel/spin/${this.userService.widgetToken}`;
+    const headers = authorizedHeaders(this.userService.apiToken);
+    const request = new Request(url, { headers, method: 'POST' });
+    const response = await fetch(request);
+    return handleResponse(response);
+  }
+
+  showSafeModeWindow() {
+    this.windowsService.showWindow({
+      componentName: 'SafeMode',
+      title: $t('Safe Mode'),
+      queryParams: {},
+      size: {
+        width: 450,
+        height: 700,
+      },
+    });
+  }
+
+  async fetchSafeModeStatus() {
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/safemode`;
+    const headers = authorizedHeaders(this.userService.apiToken);
+    return jfetch<{
+      safe_mode_settings: { active: boolean; data: ISafeModeServerSettings; ends_at: number };
+    }>(url, {
+      headers,
+    })
+      .then(data => {
+        this.updateSafeModeSettingsFromServer(data.safe_mode_settings.data);
+
+        if (data.safe_mode_settings.active) {
+          this.onSafeModeEnabled(data.safe_mode_settings.ends_at);
+        } else {
+          this.onSafeModeDisabled();
+        }
+      })
+      .catch(error => {
+        console.warn('Error fetching safe mode settings', error);
+        this.onSafeModeDisabled();
+      });
+  }
+
+  updateSafeModeSettingsFromServer(data: ISafeModeServerSettings) {
+    this.SET_SAFE_MODE_SETTINGS({
+      clearChat: data.clear_chat,
+      clearQueuedAlerts: data.clear_queued_alerts,
+      clearRecentEvents: data.clear_recent_events,
+      disableChatAlerts: data.disable_chat_alerts,
+      disableFollowerAlerts: data.disable_follower_alerts,
+      emoteOnly: data.emote_only,
+      followerOnly: data.follower_only,
+      subOnly: data.sub_only,
+      enableTimer: data.enable_timer,
+      timeInMinutes: data.time_in_minutes,
+    });
+  }
+
+  safeModeTimeout: number = null;
+
+  setSafeModeTimeout(ms: number) {
+    if (this.safeModeTimeout) clearTimeout(this.safeModeTimeout);
+
+    this.safeModeTimeout = window.setTimeout(() => this.disableSafeMode(), ms);
+  }
+
+  setSafeModeSettings(patch: Partial<ISafeModeSettings>) {
+    this.SET_SAFE_MODE_SETTINGS(patch);
+  }
+
+  activateSafeMode() {
+    if (this.state.safeMode.enabled) return;
+
+    const headers = authorizedHeaders(
+      this.userService.apiToken,
+      new Headers({ 'Content-Type': 'application/json' }),
+    );
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/safemode`;
+    const sm = this.state.safeMode;
+    const body = JSON.stringify({
+      clear_chat: sm.clearChat,
+      clear_queued_alerts: sm.clearQueuedAlerts,
+      clear_recent_events: sm.clearRecentEvents,
+      disable_chat_alerts: sm.disableChatAlerts,
+      disable_follower_alerts: sm.disableFollowerAlerts,
+      emote_only: sm.emoteOnly,
+      follower_only: sm.followerOnly,
+      sub_only: sm.subOnly,
+      enable_timer: sm.enableTimer,
+      time_in_minutes: sm.timeInMinutes,
+    });
+    this.SET_SAFE_MODE_SETTINGS({ loading: true });
+    const promise = jfetch(new Request(url, { headers, body, method: 'POST' }));
+
+    promise.then(resp => {
+      this.safeModeStatusChanged.next(ESafeModeStatus.Enabled);
+      return resp;
+    });
+
+    promise.finally(() => this.SET_SAFE_MODE_SETTINGS({ loading: false }));
+
+    return promise;
+  }
+
+  disableSafeMode() {
+    if (!this.state.safeMode.enabled) return;
+
+    const headers = authorizedHeaders(this.userService.apiToken);
+    const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/safemode`;
+    this.SET_SAFE_MODE_SETTINGS({ loading: true });
+    const promise = jfetch(new Request(url, { headers, method: 'DELETE' }));
+
+    promise.then(resp => {
+      this.safeModeStatusChanged.next(ESafeModeStatus.Disabled);
+    });
+
+    promise.finally(() => this.SET_SAFE_MODE_SETTINGS({ loading: false }));
+
+    return promise;
+  }
+
+  onSafeModeEnabled(endsAt?: number) {
+    this.SET_SAFE_MODE_SETTINGS({ enabled: true });
+    if (endsAt) this.setSafeModeTimeout(Math.max(endsAt - Date.now(), 0));
+    if (this.state.safeMode.clearRecentEvents) {
+      this.SET_RECENT_EVENTS([]);
+    }
+
+    this.safeModeStatusChanged.next(ESafeModeStatus.Enabled);
+  }
+
+  onSafeModeDisabled() {
+    this.SET_SAFE_MODE_SETTINGS({ enabled: false });
+    this.safeModeStatusChanged.next(ESafeModeStatus.Disabled);
+  }
+
+  setMuteChatNotifs(val: boolean) {
+    this.SET_MUTE_CHAT_NOTIFS(val);
+  }
+
   @mutation()
   private ADD_RECENT_EVENT(events: IRecentEvent[]) {
     this.state.recentEvents = events.concat(this.state.recentEvents);
+  }
+
+  @mutation()
+  private TOGGLE_RECENT_EVENT_READ(uuid: string) {
+    this.state.recentEvents.forEach(event => {
+      if (event.uuid === uuid) {
+        event.read = !event.read;
+      }
+    });
   }
 
   @mutation()
@@ -269,5 +1211,37 @@ export class RecentEventsService extends StatefulService<IRecentEventsState> {
   @mutation()
   private SET_MUTED(muted: boolean) {
     this.state.muted = muted;
+  }
+
+  @mutation()
+  private SET_MEDIA_SHARE(enabled: boolean) {
+    this.state.mediaShareEnabled = enabled;
+  }
+
+  @mutation()
+  private SET_FILTER_CONFIG(settings: IRecentEventFilterConfig) {
+    this.state.filterConfig = settings;
+  }
+
+  @mutation()
+  private SET_SINGLE_FILTER_CONFIG(key: string, value: boolean | number) {
+    // TODO: index
+    // @ts-ignore
+    this.state.filterConfig[key] = value;
+  }
+
+  @mutation()
+  private SET_PAUSED(queuePaused: boolean) {
+    this.state.queuePaused = queuePaused;
+  }
+
+  @mutation()
+  private SET_SAFE_MODE_SETTINGS(patch: Partial<ISafeModeSettings>) {
+    this.state.safeMode = { ...this.state.safeMode, ...patch };
+  }
+
+  @mutation()
+  private SET_MUTE_CHAT_NOTIFS(val: boolean) {
+    this.state.enableChatNotifs = val;
   }
 }

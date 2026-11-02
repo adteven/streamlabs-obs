@@ -9,7 +9,8 @@ import { IInputMetadata, inputComponents, metadata } from 'components/shared/inp
 import HFormGroup from 'components/shared/inputs/HFormGroup.vue';
 import { debounce } from 'lodash-decorators';
 import { IAlertBoxVariation } from 'services/widgets/settings/alert-box/alert-box-api';
-import electron from 'electron';
+import Scrollable from 'components/shared/Scrollable';
+import * as remote from '@electron/remote';
 
 const { ToggleInput } = inputComponents;
 
@@ -48,7 +49,7 @@ const DEFAULT_CUSTOM_FIELDS: Dictionary<ICustomField> = {
   customField2: {
     label: 'Slider Example',
     type: 'slider',
-    value: 3,
+    value: 100,
     max: 200,
     min: 100,
     steps: 4,
@@ -77,18 +78,17 @@ const DEFAULT_CUSTOM_FIELDS: Dictionary<ICustomField> = {
     value: 'optionB',
   },
 
-  // TODO:
-  // customField6: {
-  //   label: 'Image Input Example',
-  //   type: 'image-input',
-  //   value: null
-  // },
-  //
-  // customField7: {
-  //   label: 'Sound Input Example',
-  //   type: 'sound-input',
-  //   value: null
-  // }
+  customField6: {
+    label: 'Image Input Example',
+    type: 'image-input',
+    value: null,
+  },
+
+  customField7: {
+    label: 'Sound Input Example',
+    type: 'sound-input',
+    value: null,
+  },
 };
 
 @Component({
@@ -96,6 +96,7 @@ const DEFAULT_CUSTOM_FIELDS: Dictionary<ICustomField> = {
     CodeInput,
     ToggleInput,
     HFormGroup,
+    Scrollable,
   },
 })
 export default class CustomFieldsEditor extends Vue {
@@ -120,15 +121,21 @@ export default class CustomFieldsEditor extends Vue {
   created() {
     this.customFields = this.selectedVariation
       ? this.selectedVariation.settings.customJson
-      : this.value.settings['custom_json'];
+      : // TODO: index
+        // @ts-ignore
+        this.value.settings['custom_json'];
     this.editorInputValue = this.selectedVariation
       ? this.selectedVariation.settings.customJson
-      : this.value.settings['custom_json'];
+      : // TODO: index
+        // @ts-ignore
+        this.value.settings['custom_json'];
     this.settingsService = this.widgetsService.getWidgetSettingsService(this.value.type);
   }
 
   get selectedVariation() {
     if (!this.metadata.selectedAlert || !this.metadata.selectedId) return;
+    // TODO: index
+    // @ts-ignore
     return this.value.settings[this.metadata.selectedAlert].variations.find(
       (variation: IAlertBoxVariation) => variation.id === this.metadata.selectedId,
     );
@@ -168,7 +175,16 @@ export default class CustomFieldsEditor extends Vue {
           });
           break;
 
-        // TODO: add image-input and sound-input
+        case 'sound-input':
+          inputMetadata = metadata.sound({
+            title: field.label,
+          });
+          break;
+        case 'image-input':
+          inputMetadata = metadata.mediaGallery({
+            title: field.label,
+          });
+          break;
         default:
           inputMetadata = null;
           break;
@@ -179,11 +195,15 @@ export default class CustomFieldsEditor extends Vue {
 
   setCustomJson(newData: IWidgetData) {
     if (this.selectedVariation) {
+      // TODO: index
+      // @ts-ignore
       const newVariation = newData.settings[this.metadata.selectedAlert].variations.find(
         (variation: IAlertBoxVariation) => variation.id === this.metadata.selectedId,
       );
       newVariation.settings.customJson = this.customFields;
     } else {
+      // TODO: index
+      // @ts-ignore
       newData.settings['custom_json'] = this.customFields;
     }
     return newData;
@@ -196,7 +216,7 @@ export default class CustomFieldsEditor extends Vue {
     newData = this.setCustomJson(newData);
     try {
       await this.settingsService.saveSettings(newData.settings);
-    } catch (e) {
+    } catch (e: unknown) {
       this.onFailHandler($t('Save failed, something went wrong.'));
       this.isLoading = false;
       return;
@@ -219,8 +239,8 @@ export default class CustomFieldsEditor extends Vue {
     let newCustomFields: Dictionary<ICustomField>;
     try {
       newCustomFields = JSON.parse(this.editorInputValue);
-    } catch (e) {
-      electron.remote.dialog.showErrorBox($t('Error'), $t('Invalid JSON'));
+    } catch (e: unknown) {
+      remote.dialog.showErrorBox($t('Error'), $t('Invalid JSON'));
       return;
     }
 
@@ -239,6 +259,8 @@ export default class CustomFieldsEditor extends Vue {
 
   emitInput(newValue: IWidgetData) {
     this.$emit('input', newValue);
+    // TODO: index
+    // @ts-ignore
     this.editorInputValue = newValue.settings['custom_json'];
   }
 

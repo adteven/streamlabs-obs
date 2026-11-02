@@ -1,0 +1,299 @@
+import {
+  chatIsVisible,
+  clickGoLive,
+  goLive,
+  prepareToGoLive,
+  stopStream,
+  submit,
+  tryToGoLive,
+  waitForSettingsWindowLoaded,
+  waitForStreamStart,
+  waitForStreamStop,
+} from '../../helpers/modules/streaming';
+import { showSettingsWindow } from '../../helpers/modules/settings/settings';
+import {
+  clickButton,
+  focusChild,
+  isDisplayed,
+  waitForDisplayed,
+  waitForEnabled,
+} from '../../helpers/modules/core';
+import { restartApp, skipCheckingErrorsInLog, test, useWebdriver } from '../../helpers/webdriver';
+import { reserveUserFromPool, withUser } from '../../helpers/webdriver/user';
+import { getApiClient } from '../../helpers/api-client';
+import { StreamSettingsService } from '../../../app/services/settings/streaming';
+import { assertFormContains, fillForm } from '../../helpers/modules/forms';
+import { setInputValue } from '../../helpers/modules/forms/base';
+import { logIn } from '../../helpers/modules/user';
+import { dismissModal } from '../../helpers/webdriver/modals';
+import { toggleDualOutputMode } from '../../helpers/modules/dual-output';
+
+async function enableTwitchVOD(status: boolean = true) {
+  await showSettingsWindow('Output', async () => {
+    await fillForm({ Mode: 'Advanced' });
+    await waitForEnabled('[data-name="Streaming"] [data-name="VodTrackEnabled"]', {
+      timeout: 10000,
+    });
+    await fillForm('Streaming', { VodTrackEnabled: status });
+    if (status) {
+      await waitForDisplayed('[data-name="Streaming"] [data-name="VodTrackIndex"]', {
+        timeout: 10000,
+      });
+      await fillForm('Streaming', { VodTrackIndex: 3 });
+    }
+    await assertFormContains('Streaming', {
+      VodTrackEnabled: status,
+      ...(status ? { VodTrackIndex: 3 } : {}),
+    });
+    await clickButton('Close');
+  });
+}
+
+// not a react hook
+// eslint-disable-next-line react-hooks/rules-of-hooks
+useWebdriver();
+
+test('Streaming to Twitch', async t => {
+  await logIn('twitch', { multistream: false });
+
+  await goLive({
+    title: 'SLOBS Test Stream',
+    twitchGame: 'Warcraft III',
+  });
+  t.true(await chatIsVisible(), 'Chat should be visible');
+
+  // check we can't change stream setting while live
+  await showSettingsWindow('Stream');
+  await waitForDisplayed("div=You can not change these settings when you're live");
+  await stopStream();
+
+  // Twitch VOD Track
+  await enableTwitchVOD();
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+  await submit();
+  await waitForStreamStart();
+  await stopStream();
+
+  t.pass();
+});
+
+test('Streaming to Twitch without auth', async t => {
+  const userInfo = await reserveUserFromPool(t, 'twitch');
+
+  // type a new stream key in the Stream Settings Window
+  await showSettingsWindow('Stream');
+  const key = userInfo.streamKey;
+  await setInputValue('input[data-name="key"]', key, true);
+  await clickButton('Close');
+
+  // go live
+  await prepareToGoLive();
+  await clickGoLive();
+  await waitForStreamStart();
+  await stopStream();
+  t.pass();
+});
+
+test('Migrate the twitch account to the protected mode', async t => {
+  await logIn('twitch');
+
+  // change stream key before go live
+  const streamSettings = (await getApiClient()).getResource<StreamSettingsService>(
+    'StreamSettingsService',
+  );
+  streamSettings.setSettings({ key: 'fake key', protectedModeMigrationRequired: true });
+
+  await restartApp(t); // restarting the app should call migration again
+
+  // go live
+  await clickGoLive();
+  await waitForStreamStop(); // can't go live with a fake key
+
+  // This prevents the test from failing due to the fake key, which logs an error.
+  // Dismissing the error modal should act as confirmation that the stream failed to start,
+  // which is the expected behavior.
+  skipCheckingErrorsInLog();
+  await dismissModal(t);
+
+  // check that settings have been switched to the Custom Ingest mode
+  await showSettingsWindow('Stream');
+  t.true(await isDisplayed('button=Use recommended settings'), 'Protected mode should be disabled');
+
+  // use recommended settings
+  await clickButton('Use recommended settings');
+  // setup custom server
+  streamSettings.setSettings({
+    server: 'rtmp://live.twitch.tv/app/',
+    protectedModeMigrationRequired: true,
+  });
+
+  await restartApp(t); // restarting the app should call migration again
+  await goLive({
+    title: 'SLOBS Test Stream',
+    twitchGame: 'Fortnite',
+  });
+  // TODO: Add validation that the destination switchers in the go live window are hidden (requires multistream test account)
+  // TODO: Add validation that the Twitch edit stream form in the go live window is the only form (requires multistream test account)
+  await stopStream();
+
+  // check that settings have been switched to the Custom Ingest mode
+  await showSettingsWindow('Stream');
+  t.false(
+    await isDisplayed('button=Use recommended settings'),
+    'Protected mode should be disabled',
+  );
+});
+
+// TODO: Re-enable after reauthing userpool
+test.skip('Twitch Tags', async t => {
+  await logIn('twitch');
+  await focusChild();
+
+  await prepareToGoLive();
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+
+  // Add a couple of tags
+  await fillForm({
+    twitchTags: ['100%', 'AMA'],
+  });
+
+  // Start and stop the stream
+  await submit();
+  await waitForStreamStart();
+  await stopStream();
+
+  // Go to Edit Stream Info to assert tags have persisted on Twitch
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+  await assertFormContains({
+    twitchTags: ['100%', 'AMA'],
+  });
+
+  t.pass();
+});
+
+test('Streaming to Twitch unlisted category', async t => {
+  await logIn('twitch');
+  await goLive({
+    title: 'SLOBS Test unlisted Stream',
+    twitchGame: 'Unlisted',
+  });
+  t.pass();
+});
+
+// TODO: Skipped because of an error likely caused by Selenium and Chromium version mismatch
+test.skip(
+  'Twitch Enhanced Broadcasting',
+  withUser('twitch', { multistream: true, prime: true }),
+  async t => {
+    await prepareToGoLive();
+
+    // Single Output Single Stream
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    await fillForm({
+      title: 'Test Stream',
+      twitchGame: 'Fortnite',
+      isEnhancedBroadcasting: true,
+    });
+
+    await submit();
+    await waitForStreamStart();
+    await stopStream();
+
+    // Single Output Single Stream with Twitch VOD enabled
+    await enableTwitchVOD();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+    await submit();
+    await waitForStreamStart();
+    await stopStream();
+
+    // Single Output Multistream
+    // TODO: Add more test accounts with YouTube streaming enabled to the user pool
+    // so that this test doesn't fail due to rate-limiting from YouTube
+    // await clickGoLive();
+    // await waitForSettingsWindowLoaded();
+
+    // await fillForm({
+    //   youtube: true,
+    // });
+
+    // await waitForSettingsWindowLoaded();
+    // await submit();
+    // await waitForStreamStart();
+    // await stopStream();
+    t.pass();
+  },
+);
+
+// TODO: Like the enhanced broadcasting test, skipped because error likely caused by
+// Selenium and Chromium version mismatch
+test.skip(
+  'Twitch Dual Format (Dual Stream)',
+  withUser('twitch', { multistream: true, prime: true }),
+  async t => {
+    await prepareToGoLive();
+
+    // Dual Stream is only available in Dual Output mode
+    await toggleDualOutputMode();
+
+    // Single Output Single Stream
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    // Automatically enables/disables Enhanced Broadcasting when going live with dual stream
+    await assertFormContains({
+      isEnhancedBroadcasting: false,
+    });
+    await fillForm({
+      twitchDisplay: 'both',
+    });
+
+    await waitForSettingsWindowLoaded();
+    await submit();
+    await waitForStreamStart();
+    await stopStream();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+    await fillForm({
+      twitchDisplay: 'vertical',
+    });
+    await assertFormContains({
+      isEnhancedBroadcasting: false,
+    });
+
+    await fillForm({
+      isEnhancedBroadcasting: true,
+      twitchDisplay: 'both',
+    });
+
+    await submit();
+    await waitForStreamStart();
+    await stopStream();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    // Also maintains the Enhanced Broadcasting setting when already enabled
+    await fillForm({
+      isEnhancedBroadcasting: true,
+    });
+
+    // Multistream
+    // TODO: Add more test accounts with YouTube streaming enabled to the user pool
+    // so that this test doesn't fail due to rate-limiting from YouTube
+    // await clickGoLive();
+    // await waitForSettingsWindowLoaded();
+    // await fillForm({
+    //   youtube: true,
+    // });
+    // await waitForSettingsWindowLoaded();
+    // await submit();
+    // await waitForStreamStart();
+    // await stopStream();
+    t.pass();
+  },
+);

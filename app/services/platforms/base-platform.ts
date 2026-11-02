@@ -1,0 +1,229 @@
+import { ExecuteInCurrentWindow, Inject, mutation, StatefulService } from 'services/core';
+import {
+  EPlatformCallResult,
+  IPlatformState,
+  TPlatform,
+  TPlatformCapability,
+  TStartStreamOptions,
+  TPlatformCapabilityMap,
+  TLiveDockFeature,
+  platformLabels,
+} from './index';
+import { StreamingService } from 'services/streaming';
+import { UserService } from 'services/user';
+import { HostsService } from 'services/hosts';
+import { DualOutputService } from 'services/dual-output';
+import { IFacebookStartStreamOptions } from './facebook';
+import { StreamSettingsService } from '../settings/streaming';
+import * as remote from '@electron/remote';
+import { VideoSettingsService } from 'services/settings-v2/video';
+import { ENotificationType, NotificationsService } from 'services/notifications';
+import { IJsonRpcRequest } from 'services/api/jsonrpc';
+import { StreamError, throwStreamError, TStreamErrorType } from 'services/streaming/stream-error';
+import { $t } from 'services/i18n/i18n';
+
+const VIEWER_COUNT_UPDATE_INTERVAL = 60 * 1000;
+
+/**
+ * Base class for platforms
+ * Keeps shared code for all platforms
+ */
+export abstract class BasePlatformService<T extends IPlatformState> extends StatefulService<T> {
+  static initialState: IPlatformState = {
+    streamKey: '',
+    viewersCount: 0,
+    settings: null,
+    isPrepopulated: false,
+  };
+
+  @Inject() protected streamingService: StreamingService;
+  @Inject() protected userService: UserService;
+  @Inject() protected hostsService: HostsService;
+  @Inject() protected streamSettingsService: StreamSettingsService;
+  @Inject() protected dualOutputService: DualOutputService;
+  @Inject() protected videoSettingsService: VideoSettingsService;
+  @Inject() protected notificationsService: NotificationsService;
+
+  abstract readonly platform: TPlatform;
+
+  abstract capabilities: Set<TPlatformCapability>;
+
+  abstract liveDockFeatures: Set<TLiveDockFeature>;
+
+  @ExecuteInCurrentWindow()
+  hasCapability<T extends TPlatformCapability>(capability: T): this is TPlatformCapabilityMap[T] {
+    return this.capabilities.has(capability);
+  }
+
+  @ExecuteInCurrentWindow()
+  hasLiveDockFeature(feature: TLiveDockFeature) {
+    return this.liveDockFeatures.has(feature);
+  }
+
+  get mergeUrl() {
+    const host = this.hostsService.streamlabs;
+    const token = this.userService.apiToken;
+    return `https://${host}/slobs/merge/${token}/${this.platform}_account`;
+  }
+
+  averageViewers: number;
+  peakViewers: number;
+  private nViewerSamples: number;
+
+  async afterGoLive(): Promise<void> {
+    this.averageViewers = 0;
+    this.peakViewers = 0;
+    this.nViewerSamples = 0;
+
+    // update viewers count
+    const runInterval = async () => {
+      if (this.hasCapability('viewerCount')) {
+        const count = await this.fetchViewerCount();
+
+        this.nViewerSamples += 1;
+        this.averageViewers =
+          (this.averageViewers * (this.nViewerSamples - 1) + count) / this.nViewerSamples;
+        this.peakViewers = Math.max(this.peakViewers, count);
+
+        this.SET_VIEWERS_COUNT(count);
+      }
+
+      // stop updating if streaming has stopped
+      if (this.streamingService.views.isMidStreamMode) {
+        setTimeout(runInterval, VIEWER_COUNT_UPDATE_INTERVAL);
+      }
+    };
+    if (this.hasCapability('viewerCount')) await runInterval();
+  }
+
+  unlink() {
+    // unlink platform and reload auth state
+    // const url = `https://${this.hostsService.streamlabs}/api/v5/slobs/unlink/${this.platform}_account`;
+    // const headers = authorizedHeaders(this.userService.apiToken!);
+    // const request = new Request(url, { headers });
+    // return fetch(request)
+    //   .then(handleResponse)
+    //   .then(_ => this.userService.updateLinkedPlatforms());
+
+    remote.shell.openExternal(
+      `https://${this.hostsService.streamlabs}/dashboard#/settings/account-settings/platforms`,
+    );
+  }
+
+  protected syncSettingsWithLocalStorage() {
+    // save settings to the local storage
+    const savedSettings: IFacebookStartStreamOptions = JSON.parse(
+      localStorage.getItem(this.serviceName) as string,
+    );
+    if (savedSettings) this.UPDATE_STREAM_SETTINGS(savedSettings);
+    this.store.watch(
+      () => this.state.settings,
+      () => {
+        localStorage.setItem(this.serviceName, JSON.stringify(this.state.settings));
+      },
+      { deep: true },
+    );
+  }
+
+  async validatePlatform() {
+    return EPlatformCallResult.Success;
+  }
+
+  postNotification(
+    message: string,
+    type: ENotificationType = ENotificationType.WARNING,
+    action?: IJsonRpcRequest,
+  ) {
+    this.notificationsService.actions.push({
+      message,
+      type,
+      lifeTime: 5000,
+      action,
+    });
+  }
+
+  fetchUserInfo() {
+    return Promise.resolve({});
+  }
+
+  setPlatformContext(platform: TPlatform) {
+    const mode = this.streamingService.views.getPlatformMode(platform);
+    this.UPDATE_STREAM_SETTINGS({
+      mode,
+    });
+  }
+
+  throwPlatformError(
+    platform: TPlatform,
+    e: StreamError | any,
+    errorType: TStreamErrorType = 'PLATFORM_REQUEST_FAILED',
+  ): never {
+    console.error(`${platformLabels(platform)} Error: `, e);
+
+    if (e instanceof StreamError) {
+      throwStreamError(e.type, { ...e, platform }, e.details);
+    }
+
+    const message =
+      e.result?.data?.message ||
+      e.result?.message ||
+      e.statusText ||
+      e.message ||
+      $t('Unknown %{platform} error', { platform: platformLabels(platform) });
+
+    throwStreamError(
+      errorType,
+      {
+        status: e.status,
+        statusText: message,
+        platform,
+      },
+      message,
+    );
+  }
+
+  /**
+   * Serialize error for logging
+   * @remarks This method attempts to serialize an error object but if it fails will
+   * just return the original error object.
+   * @param e - The error object to serialize (also could be not an object or error).
+   * @returns The serialized error as a string or the original non-serialized error.
+   */
+  serializeError(e: unknown): string | unknown {
+    if (e && typeof e === 'object' && !(e instanceof Error)) {
+      try {
+        return JSON.stringify(e);
+      } catch {
+        // Failed to serialize error, return the original error object.
+        // Skip logging in case other functions that call this log the error themselves.
+      }
+    }
+
+    return e;
+  }
+
+  @mutation()
+  protected SET_VIEWERS_COUNT(viewers: number) {
+    this.state.viewersCount = viewers;
+  }
+
+  @mutation()
+  protected SET_STREAM_KEY(key: string) {
+    this.state.streamKey = key;
+  }
+
+  @mutation()
+  protected SET_PREPOPULATED(isPrepopulated: boolean) {
+    this.state.isPrepopulated = isPrepopulated;
+  }
+
+  @mutation()
+  protected SET_STREAM_SETTINGS(settings: TStartStreamOptions) {
+    this.state.settings = settings;
+  }
+
+  @mutation()
+  protected UPDATE_STREAM_SETTINGS(settingsPatch: Partial<TStartStreamOptions>) {
+    this.state.settings = { ...this.state.settings, ...settingsPatch };
+  }
+}

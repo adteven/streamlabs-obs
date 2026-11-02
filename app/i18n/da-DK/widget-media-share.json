@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Forbudte medier",
+  "Price Per Second": "Pris pr. sekund",
+  "Min. Amount to Share": "Minimumsbeløb der skal deles",
+  "Max Duration": "Maksimal varighed",
+  "Buffer Time": "Buffertid",
+  "Spam Security": "Spamsikkerhed",
+  "The time between videos the next video has to buffer.": "Tiden mellem videoer som den næste video skal gemme i buffer.",
+  "Manage Media Settings": "Administrer medieindstillinger",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "Det mindste beløb, en donator skal donere for at dele medier. Standardværdien er 5,00 USD"
+}

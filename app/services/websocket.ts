@@ -1,20 +1,38 @@
-import electronLog from 'electron-log';
 import { Service } from './core/service';
 import { Inject } from 'services/core/injector';
 import { UserService } from 'services/user';
 import { HostsService } from 'services/hosts';
-import { handleResponse, authorizedHeaders } from 'util/requests';
-import io from 'socket.io-client';
+import { authorizedHeaders, jfetch } from 'util/requests';
 import { Subject } from 'rxjs';
 import { AppService } from 'services/app';
-import { IRecentEvent } from 'services/recent-events';
+import { IRecentEvent, ISafeModeServerSettings } from 'services/recent-events';
+import { importSocketIOClient } from '../util/slow-imports';
+import { SceneCollectionsService } from 'services/scene-collections';
+import { TPlatform } from './platforms';
+import Utils from './utils';
 
 export type TSocketEvent =
   | IStreamlabelsSocketEvent
   | IAlertPlayingSocketEvent
   | IAlertProfileChanged
   | IEventSocketEvent
-  | IFmExtEnabledSocketEvent;
+  | IFmExtEnabledSocketEvent
+  | IEventPanelSettingsChangedSocketEvent
+  | IMediaSharingSettingsUpdateSocketEvent
+  | IPauseEventQueueSocketEvent
+  | IUnpauseEventQueueSocketEvent
+  | IPrimeSubEvent
+  | ISafeModeEnabledSocketEvent
+  | ISafeModeDisabledSocketEvent
+  | ISLIDMerged
+  | IUserAccountMerged
+  | IUserAccountUnlinked
+  | IUserAccountMergeError
+  | IAccountPermissionsRequired
+  | IStreamShiftRequested
+  | IStreamShiftActionCompleted
+  | IVisionSocketEvent
+  | IUserStateSocketEvent;
 
 interface IStreamlabelsSocketEvent {
   type: 'streamlabels';
@@ -27,7 +45,6 @@ export interface IEventSocketEvent {
   type:
     | 'merch'
     | 'donation'
-    | 'facemaskdonation'
     | 'follow'
     | 'subscription'
     | 'bits'
@@ -45,8 +62,24 @@ export interface IEventSocketEvent {
     | 'tiltifydonation'
     | 'donordrivedonation'
     | 'justgivingdonation'
-    | 'treat';
+    | 'treat'
+    | 'powerUp'
+    | 'kicks'
+    | 'account_permissions_required'
+    | 'visionEvent'
+    | 'userStateUpdated'
+    | 'repost';
+  for: string;
   message: IRecentEvent[];
+}
+
+interface IPrimeSubEvent {
+  type: 'streamlabs_prime_subscribe';
+  message: {
+    expires_at: string;
+    for: string;
+    type: 'streamlabs_prime_subscribe';
+  };
 }
 
 interface IFmExtEnabledSocketEvent {
@@ -56,7 +89,6 @@ interface IFmExtEnabledSocketEvent {
 export interface IAlertPlayingSocketEvent {
   type: 'alertPlaying';
   message: {
-    facemask?: string;
     type: string;
     amount?: string;
   };
@@ -66,27 +98,126 @@ interface IAlertProfileChanged {
   type: 'alertProfileChanged';
 }
 
+interface IPauseEventQueueSocketEvent {
+  type: 'pauseQueue';
+}
+
+interface IUnpauseEventQueueSocketEvent {
+  type: 'unpauseQueue';
+}
+
+interface IEventPanelSettingsChangedSocketEvent {
+  type: 'eventsPanelSettingsUpdate';
+  message: {
+    muted?: boolean;
+  };
+}
+
+interface IMediaSharingSettingsUpdateSocketEvent {
+  type: 'mediaSharingSettingsUpdate';
+  message: {
+    advanced_settings: {
+      enabled?: boolean;
+    };
+  };
+}
+
+export interface ISafeModeEnabledSocketEvent {
+  type: 'safeModeEnabled';
+  message: ISafeModeServerSettings & { ends_at: number };
+}
+
+interface ISafeModeDisabledSocketEvent {
+  type: 'safeModeDisabled';
+  message: {};
+}
+
+interface ISLIDMerged {
+  type: 'slid.force_logout';
+  for: string;
+}
+
+interface IUserAccountMerged {
+  type: 'account_merged';
+  for: string;
+}
+interface IUserAccountUnlinked {
+  type: 'account_unlinked';
+  for: string;
+}
+interface IUserAccountMergeError {
+  type: 'account_merge_error';
+  for: string;
+  platform: TPlatform;
+  message: string;
+  code: number;
+}
+
+interface IAccountPermissionsRequired {
+  type: 'account_permissions_required';
+  for: string;
+  message: {
+    platform: string;
+    url: any;
+  }[];
+}
+
+export interface IStreamShiftRequested {
+  type: 'streamSwitchRequest';
+  for: string;
+  data: {
+    identifier: string;
+  };
+  event_id: string;
+}
+
+export interface IStreamShiftActionCompleted {
+  type: 'switchActionComplete';
+  for: string;
+  data: {
+    identifier: string;
+  };
+  event_id: string;
+}
+interface IVisionSocketEvent {
+  type: 'visionEvent';
+  message: {};
+}
+
+interface IUserStateSocketEvent {
+  type: 'userStateUpdated';
+  message: {
+    updated_states: any;
+    updated_states_tree: any;
+  };
+}
+
 export class WebsocketService extends Service {
   @Inject() private userService: UserService;
   @Inject() private hostsService: HostsService;
   @Inject() private appService: AppService;
+  @Inject() private sceneCollectionsService: SceneCollectionsService;
 
   socket: SocketIOClient.Socket;
 
   socketEvent = new Subject<TSocketEvent>();
+  io: SocketIOClientStatic;
 
   init() {
-    this.openSocketConnection();
-
-    this.userService.userLogin.subscribe(() => {
+    this.sceneCollectionsService.collectionInitialized.subscribe(() => {
       this.openSocketConnection();
     });
   }
 
-  openSocketConnection() {
-    if (!this.userService.isLoggedIn()) {
+  async openSocketConnection() {
+    if (!this.userService.isLoggedIn) {
       console.warn('User must be logged in to make a socket connection');
       return;
+    }
+
+    // dynamically import socket.io because it takes to much time to import it on startup
+    if (!this.io) {
+      this.io = (await importSocketIOClient()).default;
     }
 
     if (this.socket) {
@@ -97,12 +228,11 @@ export class WebsocketService extends Service {
     const headers = authorizedHeaders(this.userService.apiToken);
     const request = new Request(url, { headers });
 
-    fetch(request)
-      .then(handleResponse)
+    jfetch<{ socket_token: string }>(request)
       .then(json => json.socket_token)
       .then(token => {
         const url = `${this.hostsService.io}?token=${token}`;
-        this.socket = io(url, { transports: ['websocket'] });
+        this.socket = this.io(url, { transports: ['websocket'] });
 
         // These are useful for debugging
         this.socket.on('connect', () => this.log('Connection Opened'));
@@ -118,11 +248,23 @@ export class WebsocketService extends Service {
       });
   }
 
+  sendSocketEventForTest(event: TSocketEvent): void {
+    if (!Utils.isTestMode()) return;
+    this.socketEvent.next(event);
+  }
+
+  disconnect() {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = undefined;
+    }
+  }
+
   private log(message: string, ...args: any[]) {
     console.debug(`WS: ${message}`, ...args);
 
     if (this.appService.state.argv.includes('--network-logging')) {
-      electronLog.log(`WS: ${message}`);
+      console.log(`WS: ${message}`);
     }
   }
 }

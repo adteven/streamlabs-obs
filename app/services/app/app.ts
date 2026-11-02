@@ -5,24 +5,23 @@ import { HotkeysService } from 'services/hotkeys';
 import { UserService } from 'services/user';
 import { ShortcutsService } from 'services/shortcuts';
 import { Inject } from 'services/core/injector';
-import electron from 'electron';
+import electron, { ipcRenderer } from 'electron';
 import { TransitionsService } from 'services/transitions';
 import { SourcesService } from 'services/sources';
 import { ScenesService } from 'services/scenes';
 import { VideoService } from 'services/video';
-import { StreamInfoService } from 'services/stream-info';
-import { track } from 'services/usage-statistics';
+import { VideoSettingsService } from 'services/settings-v2/video';
+import { track, UsageStatisticsService } from 'services/usage-statistics';
 import { IpcServerService } from 'services/api/ipc-server';
 import { TcpServerService } from 'services/api/tcp-server';
 import { StreamlabelsService } from 'services/streamlabels';
-import { PerformanceMonitorService } from 'services/performance-monitor';
+import { PerformanceService } from 'services/performance';
 import { SceneCollectionsService } from 'services/scene-collections';
 import { FileManagerService } from 'services/file-manager';
 import { PatchNotesService } from 'services/patch-notes';
 import { ProtocolLinksService } from 'services/protocol-links';
 import { WindowsService } from 'services/windows';
 import * as obs from '../../../obs-api';
-import { FacemasksService } from 'services/facemasks';
 import { OutageNotificationsService } from 'services/outage-notifications';
 import { CrashReporterService } from 'services/crash-reporter';
 import { PlatformAppsService } from 'services/platform-apps';
@@ -33,11 +32,41 @@ import { RunInLoadingMode } from './app-decorators';
 import { RecentEventsService } from 'services/recent-events';
 import Utils from 'services/utils';
 import { Subject } from 'rxjs';
+import { DismissablesService } from 'services/dismissables';
+import { RestreamService } from 'services/restream';
+import { downloadFile } from '../../util/requests';
+import { TouchBarService } from 'services/touch-bar';
+import { ApplicationMenuService } from 'services/application-menu';
+import { KeyListenerService } from 'services/key-listener';
+import { MetricsService } from '../metrics';
+import { SettingsService } from '../settings';
+import { DualOutputService } from 'services/dual-output';
+import { OS, getOS } from 'util/operating-systems';
+import * as remote from '@electron/remote';
+import { RealmService } from 'services/realm';
+import { StreamAvatarService } from 'services/stream-avatar/stream-avatar-service';
+import { NavigationService } from 'services/navigation';
+import { StreamingService } from 'services/streaming';
+import { VirtualWebcamService } from 'services/virtual-webcam';
+import { WebsocketService } from 'services/websocket';
+import { ObsModuleLoadNotificationsService } from 'services/obs-module-load-notifications-service';
+import {
+  executeImmediateShutdownSteps,
+  IWorkerShutdownPlan,
+  runWorkerShutdown,
+} from 'util/worker-shutdown';
+
+const SHUTDOWN_ANALYTICS_TIMEOUT_MS = 3 * 1000;
 
 interface IAppState {
   loading: boolean;
   argv: string[];
   errorAlert: boolean;
+  onboarded: boolean;
+}
+
+export interface IRunInLoadingModeOptions {
+  hideStyleBlockers?: boolean;
 }
 
 /**
@@ -50,22 +79,12 @@ export class AppService extends StatefulService<IAppState> {
   @Inject() hotkeysService: HotkeysService;
   @Inject() userService: UserService;
   @Inject() shortcutsService: ShortcutsService;
-  @Inject() streamInfoService: StreamInfoService;
   @Inject() patchNotesService: PatchNotesService;
   @Inject() windowsService: WindowsService;
-  @Inject() facemasksService: FacemasksService;
   @Inject() outageNotificationsService: OutageNotificationsService;
   @Inject() platformAppsService: PlatformAppsService;
   @Inject() gameOverlayService: GameOverlayService;
-
-  static initialState: IAppState = {
-    loading: true,
-    argv: electron.remote.process.argv,
-    errorAlert: false,
-  };
-
-  readonly appDataDirectory = electron.remote.app.getPath('userData');
-
+  @Inject() touchBarService: TouchBarService;
   @Inject() transitionsService: TransitionsService;
   @Inject() sourcesService: SourcesService;
   @Inject() scenesService: ScenesService;
@@ -73,13 +92,41 @@ export class AppService extends StatefulService<IAppState> {
   @Inject() streamlabelsService: StreamlabelsService;
   @Inject() private ipcServerService: IpcServerService;
   @Inject() private tcpServerService: TcpServerService;
-  @Inject() private performanceMonitorService: PerformanceMonitorService;
+  @Inject() private performanceService: PerformanceService;
   @Inject() private fileManagerService: FileManagerService;
   @Inject() private protocolLinksService: ProtocolLinksService;
   @Inject() private crashReporterService: CrashReporterService;
   @Inject() private announcementsService: AnnouncementsService;
   @Inject() private incrementalRolloutService: IncrementalRolloutService;
   @Inject() private recentEventsService: RecentEventsService;
+  @Inject() private dismissablesService: DismissablesService;
+  @Inject() private restreamService: RestreamService;
+  @Inject() private applicationMenuService: ApplicationMenuService;
+  @Inject() private keyListenerService: KeyListenerService;
+  @Inject() private metricsService: MetricsService;
+  @Inject() private settingsService: SettingsService;
+  @Inject() private usageStatisticsService: UsageStatisticsService;
+  @Inject() private videoSettingsService: VideoSettingsService;
+  @Inject() private dualOutputService: DualOutputService;
+  @Inject() private realmService: RealmService;
+  @Inject() private streamAvatarService: StreamAvatarService;
+  @Inject() private navigationService: NavigationService;
+  @Inject() private streamingService: StreamingService;
+  @Inject() private virtualWebcamService: VirtualWebcamService;
+  @Inject() private websocketService: WebsocketService;
+  @Inject() private obsModuleLoadNotificationsService: ObsModuleLoadNotificationsService;
+
+  static initialState: IAppState = {
+    loading: true,
+    argv: remote.process.argv,
+    errorAlert: false,
+    onboarded: false,
+  };
+
+  readonly appDataDirectory = remote.app.getPath('userData');
+
+  loadingChanged = new Subject<boolean>();
+
   private loadingPromises: Dictionary<Promise<any>> = {};
 
   readonly pid = require('process').pid;
@@ -93,57 +140,74 @@ export class AppService extends StatefulService<IAppState> {
       });
     }
 
-    // We want to start this as early as possible so that any
-    // exceptions raised while loading the configuration are
-    // associated with the user in sentry.
-    await this.userService.initialize();
+    this.realmService.connect();
+
+    // perform several concurrent http requests
+    await Promise.all([
+      // We want to start this as early as possible so that any
+      // exceptions raised while loading the configuration are
+      // associated with the user in sentry.
+      this.userService.autoLogin(),
+
+      // this config should be downloaded before any game-capture source has been added to the scene
+      this.downloadAutoGameCaptureConfig(),
+    ]).catch(e => {
+      // probably the internet is disconnected
+      console.error('Auto login failed', e);
+    });
 
     // Second, we want to start the crash reporter service.  We do this
     // after the user service because we want crashes to be associated
     // with a particular user if possible.
     this.crashReporterService.beginStartup();
 
-    // Initialize any apps before loading the scene collection.  This allows
-    // the apps to already be in place when their sources are created.
-    await this.platformAppsService.initialize();
+    if (!this.userService.isLoggedIn) {
+      // If this user is logged in, this would have already happened as part of login
+      // TODO: We should come up with a better way to handle this.
+      await this.sceneCollectionsService.initialize();
+    }
+    await this.obsModuleLoadNotificationsService.refreshModuleLoadNotifications();
 
-    await this.sceneCollectionsService.initialize();
-
-    const onboarded = this.onboardingService.startOnboardingIfRequired();
+    this.dismissablesService.initialize();
 
     electron.ipcRenderer.on('shutdown', () => {
+      this.windowsService.hideMainWindow();
       electron.ipcRenderer.send('acknowledgeShutdown');
       this.shutdownHandler();
     });
 
-    // Eager load services
-    const _ = [
-      this.facemasksService,
-
-      this.incrementalRolloutService,
-      this.shortcutsService,
-      this.streamlabelsService,
-
-      // Pre-fetch stream info
-      this.streamInfoService,
-    ];
-
-    this.performanceMonitorService.start();
+    this.performanceService.startMonitoringPerformance();
 
     this.ipcServerService.listen();
     this.tcpServerService.listen();
 
-    this.patchNotesService.showPatchNotesIfRequired(onboarded);
-    this.announcementsService.updateBanner();
-
-    const _outageService = this.outageNotificationsService;
+    this.patchNotesService.showPatchNotesIfRequired(this.state.onboarded);
 
     this.crashReporterService.endStartup();
 
     this.protocolLinksService.start(this.state.argv);
 
-    await this.gameOverlayService.initialize();
-    await this.recentEventsService.initialize();
+    // Initialize some mac-only services
+    if (getOS() === OS.Mac) {
+      this.touchBarService;
+      this.applicationMenuService;
+    }
+
+    ipcRenderer.send('AppInitFinished');
+    const sceneCollectionLoadingTime = Date.now();
+    this.metricsService.recordMetric('sceneCollectionLoadingTime', sceneCollectionLoadingTime);
+
+    // Log startup times
+    const metrics = this.metricsService.getMetrics();
+    if (metrics?.appStartTime) {
+      console.log(
+        '=================================\n',
+        'Time to load scene collection: ',
+        (sceneCollectionLoadingTime - metrics.appStartTime) / 1000,
+        'seconds',
+        '\n=================================',
+      );
+    }
   }
 
   shutdownStarted = new Subject();
@@ -151,27 +215,173 @@ export class AppService extends StatefulService<IAppState> {
   @track('app_close')
   private shutdownHandler() {
     this.START_LOADING();
-    obs.NodeObs.StopCrashHandler();
-    this.crashReporterService.beginShutdown();
+    this.loadingChanged.next(true);
+
+    // Stop external callers before yielding or starting the delayed teardown. This prevents API
+    // mutations from racing the final scene snapshot.
+    const ingressReport = executeImmediateShutdownSteps([
+      {
+        name: 'TcpServerService.stopListening',
+        criticality: 'required',
+        run: () => this.tcpServerService.stopListening(),
+      },
+      {
+        name: 'IpcServerService.stopListening',
+        criticality: 'required',
+        run: () => this.ipcServerService.stopListening(),
+      },
+    ]);
 
     window.setTimeout(async () => {
-      this.shutdownStarted.next();
-      this.platformAppsService.unloadAllApps();
-      this.windowsService.closeChildWindow();
-      await this.windowsService.closeAllOneOffs();
-      this.ipcServerService.stopListening();
-      this.tcpServerService.stopListening();
-      await this.userService.flushUserSession();
-      await this.sceneCollectionsService.deinitialize();
-      this.performanceMonitorService.stop();
-      this.transitionsService.shutdown();
-      await this.gameOverlayService.destroy();
-      await this.fileManagerService.flushAll();
-      obs.NodeObs.RemoveSourceCallback();
-      obs.NodeObs.OBS_service_removeCallback();
-      obs.IPC.disconnect();
-      this.crashReporterService.endShutdown();
-      electron.ipcRenderer.send('shutdownComplete');
+      const plan: IWorkerShutdownPlan = {
+        persistence: [
+          {
+            name: 'CrashReporterService.beginShutdown',
+            criticality: 'required',
+            run: () => this.crashReporterService.beginShutdown(),
+          },
+          {
+            name: 'SceneCollectionsService.persistForShutdown',
+            criticality: 'required',
+            run: () => this.sceneCollectionsService.persistForShutdown(),
+          },
+          {
+            name: 'UserService.flushUserSession',
+            criticality: 'required',
+            run: () => this.userService.flushUserSession(),
+          },
+          {
+            name: 'FileManagerService.flushAllBeforeTeardown',
+            criticality: 'required',
+            run: () => this.fileManagerService.flushAll(),
+          },
+        ],
+        teardown: [
+          {
+            name: 'AppService.shutdownStarted',
+            criticality: 'required',
+            run: () => this.shutdownStarted.next(),
+          },
+          {
+            name: 'NodeObs.InitShutdownSequence',
+            criticality: 'required',
+            run: () => obs.NodeObs.InitShutdownSequence(),
+          },
+          {
+            name: 'StreamAvatarService.stopAvatarProcess',
+            criticality: 'best-effort',
+            run: () => this.streamAvatarService.stopAvatarProcess(),
+          },
+          {
+            name: 'RecentEventsService.shutdown',
+            criticality: 'best-effort',
+            run: () => this.recentEventsService.shutdown(),
+          },
+          {
+            name: 'WebsocketService.disconnect',
+            criticality: 'best-effort',
+            run: () => this.websocketService.disconnect(),
+          },
+          {
+            name: 'KeyListenerService.shutdown',
+            criticality: 'best-effort',
+            run: () => this.keyListenerService.shutdown(),
+          },
+          {
+            name: 'PlatformAppsService.unloadAllApps',
+            criticality: 'best-effort',
+            run: () => this.platformAppsService.unloadAllApps(),
+          },
+          {
+            name: 'StreamingService.shutdown',
+            criticality: 'required',
+            run: () => this.streamingService.shutdown(),
+          },
+          {
+            name: 'WindowsService.shutdown',
+            criticality: 'best-effort',
+            run: () => this.windowsService.shutdown(),
+          },
+          {
+            name: 'PerformanceService.stop',
+            criticality: 'best-effort',
+            run: () => this.performanceService.stop(),
+          },
+          // Shut down transitions while graphics thread
+          // is still running to avoid debug spew for null transitions.
+          {
+            name: 'TransitionsService.shutdown',
+            criticality: 'required',
+            run: () => this.transitionsService.shutdown(),
+          },
+          // Deinitialize scene collections before shutting down video contexts
+          // in which case it avoids the OBS_VIDEO_INFO_IN_USE error.
+          {
+            name: 'SceneCollectionsService.deinitialize',
+            criticality: 'required',
+            run: () => this.sceneCollectionsService.deinitialize({ persist: false }),
+          },
+          {
+            name: 'VideoSettingsService.shutdown',
+            criticality: 'required',
+            run: () => this.videoSettingsService.shutdown(),
+          },
+          {
+            name: 'GameOverlayService.destroy',
+            criticality: 'required',
+            run: () => this.gameOverlayService.destroy(),
+          },
+          {
+            name: 'FileManagerService.flushAllAfterTeardown',
+            criticality: 'required',
+            run: () => this.fileManagerService.flushAll(),
+          },
+          {
+            name: 'NodeObs.RemoveSourceCallback',
+            criticality: 'required',
+            run: () => obs.NodeObs.RemoveSourceCallback(),
+          },
+          {
+            name: 'NodeObs.RemoveTransitionCallback',
+            criticality: 'required',
+            run: () => obs.NodeObs.RemoveTransitionCallback(),
+          },
+          {
+            name: 'NodeObs.RemoveVolmeterCallback',
+            criticality: 'required',
+            run: () => obs.NodeObs.RemoveVolmeterCallback(),
+          },
+          {
+            name: 'NodeObs.OBS_service_removeCallback',
+            criticality: 'required',
+            run: () => obs.NodeObs.OBS_service_removeCallback(),
+          },
+          {
+            name: 'OBS IPC disconnect',
+            criticality: 'required',
+            run: () => obs.IPC.disconnect(),
+          },
+        ],
+        bestEffort: [
+          {
+            name: 'UsageStatisticsService.flushEvents',
+            criticality: 'best-effort',
+            timeoutMs: SHUTDOWN_ANALYTICS_TIMEOUT_MS,
+            run: signal => this.usageStatisticsService.flushEvents(signal),
+          },
+        ],
+      };
+
+      await runWorkerShutdown(plan, {
+        initialReport: ingressReport,
+        markClean: () => this.crashReporterService.endShutdown(),
+        onComplete: report => {
+          electron.ipcRenderer.send('shutdownComplete', {
+            clean: report.clean,
+            failedSteps: report.failures.map(failure => failure.name),
+          });
+        },
+      });
     }, 300);
   }
 
@@ -181,14 +391,26 @@ export class AppService extends StatefulService<IAppState> {
    * Should be called for any scene-collections loading operations
    * @see RunInLoadingMode decorator
    */
-  async runInLoadingMode(fn: () => Promise<any> | void) {
-    if (!this.state.loading) {
-      this.windowsService.updateStyleBlockers('main', true);
-      this.START_LOADING();
+  async runInLoadingMode(fn: () => Promise<any> | void, options: IRunInLoadingModeOptions = {}) {
+    const opts: IRunInLoadingModeOptions = Object.assign({ hideStyleBlockers: true }, options);
 
-      // The scene collections window is the only one we don't close when
-      // switching scene collections, because it results in poor UX.
-      if (this.windowsService.state.child.componentName !== 'ManageSceneCollections') {
+    if (!this.state.loading) {
+      if (opts.hideStyleBlockers) this.windowsService.updateStyleBlockers('main', true);
+      this.START_LOADING();
+      this.loadingChanged.next(true);
+
+      // There are two exceptions that do not close the child window during this process
+      // 1. ManageSceneCollections - accesses loading mode often and often performs
+      // multiple loading operations during the window's lifecycle
+      // 2. Stream Settings - enabling custom rtmp here disables dual output which
+      // triggers loading mode, but they will want to configure settings here
+      // immediately after doing so
+      const childWindow = this.windowsService.state.child;
+      const isManageSceneCollections = childWindow.componentName === 'ManageSceneCollections';
+      const isStreamSettings =
+        childWindow.componentName === 'Settings' &&
+        this.navigationService.state.currentSettingsTab === 'Stream';
+      if (!isManageSceneCollections && !isStreamSettings) {
         this.windowsService.closeChildWindow();
       }
 
@@ -202,12 +424,12 @@ export class AppService extends StatefulService<IAppState> {
       await this.sceneCollectionsService.disableAutoSave();
     }
 
-    let error: Error = null;
+    let error: any = null;
     let result: any = null;
 
     try {
       result = fn();
-    } catch (e) {
+    } catch (e: unknown) {
       error = null;
     }
 
@@ -217,7 +439,7 @@ export class AppService extends StatefulService<IAppState> {
       this.loadingPromises[promiseId] = result;
       try {
         returningValue = await result;
-      } catch (e) {
+      } catch (e: unknown) {
         error = e;
       }
       delete this.loadingPromises[promiseId];
@@ -233,10 +455,25 @@ export class AppService extends StatefulService<IAppState> {
     this.tcpServerService.startRequestsHandling();
     this.sceneCollectionsService.enableAutoSave();
     this.FINISH_LOADING();
+    this.loadingChanged.next(false);
     // Set timeout to allow transition animation to play
-    setTimeout(() => this.windowsService.updateStyleBlockers('main', false), 500);
+    if (opts.hideStyleBlockers) {
+      setTimeout(() => this.windowsService.actions.updateStyleBlockers('main', false), 500);
+    }
     if (error) throw error;
     return returningValue;
+  }
+
+  private async downloadAutoGameCaptureConfig() {
+    // download game-list for auto game capture
+    await downloadFile(
+      'https://slobs-cdn.streamlabs.com/configs/game_capture_list.json',
+      `${this.appDataDirectory}/game_capture_list.json`,
+    );
+  }
+
+  setOnboarded(value: boolean) {
+    this.SET_ONBOARDED(value);
   }
 
   @mutation()
@@ -257,5 +494,10 @@ export class AppService extends StatefulService<IAppState> {
   @mutation()
   private SET_ARGV(argv: string[]) {
     this.state.argv = argv;
+  }
+
+  @mutation()
+  private SET_ONBOARDED(onboarded: boolean) {
+    this.state.onboarded = onboarded;
   }
 }

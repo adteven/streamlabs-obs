@@ -1,7 +1,9 @@
 import { DefaultManager, IDefaultManagerSettings } from './default-manager';
 import { Inject } from 'services/core/injector';
-import { StreamlabelsService, IStreamlabelSubscription } from 'services/streamlabels';
+import { StreamlabelsService } from 'services/streamlabels';
 import { UserService } from 'services/user';
+import { byOS, OS } from 'util/operating-systems';
+import { Subscription } from 'rxjs';
 
 export interface IStreamlabelsManagerSettings extends IDefaultManagerSettings {
   statname: string;
@@ -12,15 +14,44 @@ export class StreamlabelsManager extends DefaultManager {
   @Inject() userService: UserService;
 
   settings: IStreamlabelsManagerSettings;
-  private subscription: IStreamlabelSubscription;
-  blacklist = ['read_from_file', 'file'];
+  oldOutput: string = null;
   customUIComponent = 'StreamlabelProperties';
 
-  destroy() {
-    this.unsubscribe();
+  private subscription: Subscription;
+
+  init() {
+    super.init();
+    this.subscription = this.streamlabelsService.output.subscribe(output => {
+      // TODO: index
+      // @ts-ignore
+      if (output[this.settings.statname] !== this.oldOutput) {
+        // TODO: index
+        // @ts-ignore
+        this.oldOutput = output[this.settings.statname];
+
+        this.obsSource.update({
+          ...this.obsSource.settings,
+          // TODO: index
+          // @ts-ignore
+          text: this.normalizeText(output[this.settings.statname]),
+          read_from_file: false,
+        });
+      }
+    });
   }
 
-  normalizeSettings() {
+  get denylist() {
+    return byOS({
+      [OS.Windows]: ['read_from_file', 'text'],
+      [OS.Mac]: ['from_file', 'text', 'text_file', 'log_mode', 'log_lines'],
+    });
+  }
+
+  destroy() {
+    if (this.subscription) this.subscription.unsubscribe();
+  }
+
+  normalizeSettings(settings: IStreamlabelsManagerSettings) {
     const youtubeKeys = {
       most_recent_follower: 'most_recent_youtube_subscriber',
       session_followers: 'session_youtube_subscribers',
@@ -33,60 +64,44 @@ export class StreamlabelsManager extends DefaultManager {
       session_most_recent_subscriber: 'session_most_recent_youtube_sponsor',
     };
 
-    const mixerKeys = {
-      most_recent_follower: 'most_recent_mixer_follower',
-      session_followers: 'session_mixer_followers',
-      session_follower_count: 'session_mixer_follower_count',
-      session_most_recent_follower: 'session_most_recent_mixer_follower',
-      most_recent_subscriber: 'most_recent_mixer_subscriber',
-      session_subscribers: 'session_mixer_subscribers',
-      session_subscriber_count: 'session_mixer_subscriber_count',
-      session_most_recent_subscriber: 'session_most_recent_mixer_subscriber',
-    };
-
     if (this.userService.platform) {
       if (this.userService.platform.type === 'youtube') {
-        if (youtubeKeys[this.settings.statname]) {
-          this.settings.statname = youtubeKeys[this.settings.statname];
-        }
-      }
-
-      if (this.userService.platform.type === 'mixer') {
-        if (mixerKeys[this.settings.statname]) {
-          this.settings.statname = mixerKeys[this.settings.statname];
+        // TODO: index
+        // @ts-ignore
+        if (youtubeKeys[settings.statname]) {
+          // TODO: index
+          // @ts-ignore
+          settings.statname = youtubeKeys[settings.statname];
         }
       }
     }
   }
 
+  normalizeText(text: string | undefined) {
+    // When using `item_separator` for list items, it would appear that streamlabels will
+    // send output like `foo\\nbar` instead of `foo\nbar`, normalize here.
+    // We don't want to do it in settings since it would be sent to the backend
+    return text?.replace('\\n', '\n');
+  }
+
   applySettings(settings: Dictionary<any>) {
-    this.settings = {
+    if (settings.statname !== this.settings.statname) {
+      this.obsSource.update({
+        // TODO: index
+        // @ts-ignore
+        text: this.normalizeText(this.streamlabelsService.output.getValue()[settings.statname]),
+      });
+    }
+
+    const newSettings = {
       // Default to All-Time Top Donator
       statname: 'all_time_top_donator',
       ...this.settings,
       ...settings,
     };
 
-    this.normalizeSettings();
-
-    this.refreshSubscription();
-  }
-
-  private unsubscribe() {
-    if (this.subscription) {
-      this.streamlabelsService.unsubscribe(this.subscription);
-    }
-  }
-
-  private refreshSubscription() {
-    this.unsubscribe();
-
-    this.subscription = this.streamlabelsService.subscribe(this.settings.statname);
-
-    this.obsSource.update({
-      ...this.obsSource.settings,
-      read_from_file: true,
-      file: this.subscription.path,
-    });
+    // Modifies the object in-place
+    this.normalizeSettings(newSettings);
+    super.applySettings(newSettings);
   }
 }

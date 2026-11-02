@@ -1,0 +1,23 @@
+{
+  "Sponsor Banner": "Sponsor Banner",
+  "Placement": "Placering",
+  "Image Layout": "Bild arrangemang",
+  "Image Duration (seconds)": "Image Duration (seconds)",
+  "Add Image": "Lägg till Bild",
+  "Widget Hide Duration": "Widget döljtid",
+  "Widget Show Duration": "Widget visningstid",
+  "Banner Width": "Banderollbredd",
+  "Banner Height": "Banderollhöjd",
+  "Image Animation": "Bildanimation",
+  "Background Color": "Background Color",
+  "Transparent": "Transparens",
+  "Single": "Single",
+  "Double": "Dubbel",
+  "Set to zero to show the widget permanently.": "Sätt till noll för att visa permanent.",
+  "The amount of time the widget will appear.": "Hur länge din widget kommer visas.",
+  "These are the animations that are used to show your banner.": "Dessa är dom animationer som används för att visa din banderoll.",
+  "Visual Settings": "Visual Settings",
+  "Image Set %{number}": "Image Set %{number}",
+  "No Image": "Ingen bild",
+  "Show off rotating media to display your socials, sponsorships, CTAs or just cute animations.": "Show off rotating media to display your socials, sponsorships, CTAs or just cute animations."
+}

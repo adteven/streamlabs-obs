@@ -1,0 +1,11 @@
+{
+  "Banned Media": "禁止されたメディア",
+  "Price Per Second": "1 秒当たりの価格",
+  "Min. Amount to Share": "共有する最小金額",
+  "Max Duration": "最長期間",
+  "Buffer Time": "バッファー時間",
+  "Spam Security": "スパム セキュリティ",
+  "The time between videos the next video has to buffer.": "次のビデオがバッファーする必要があるビデオ間の時間。",
+  "Manage Media Settings": "メディア設定の管理",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "寄付者がメディアを共有するために寄付する必要がある最低金額。デフォルト値は 5 米ドル"
+}

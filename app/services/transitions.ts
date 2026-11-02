@@ -1,8 +1,7 @@
-import { mutation, StatefulService } from 'services/core/stateful-service';
+import { mutation, StatefulService, ViewHandler } from 'services/core/stateful-service';
 import * as obs from '../../obs-api';
 import { Inject } from 'services/core/injector';
 import { TObsValue, TObsFormData } from 'components/obs/inputs/ObsInput';
-import { IListOption } from 'components/shared/inputs';
 import { WindowsService } from 'services/windows';
 import { ScenesService } from 'services/scenes';
 import uuid from 'uuid/v4';
@@ -11,15 +10,25 @@ import { $t } from 'services/i18n';
 import { DefaultManager } from 'services/sources/properties-managers/default-manager';
 import { Subject } from 'rxjs';
 import { isUrl } from '../util/requests';
+import { getOS, OS } from 'util/operating-systems';
+import { UsageStatisticsService } from './usage-statistics';
+import { SourcesService } from 'services/sources';
+import { VideoSettingsService } from './settings-v2';
+import { DualOutputService } from './dual-output';
+import { NotificationsService, ENotificationType } from './notifications';
+
+export const TRANSITION_DURATION_MAX = 2_000_000_000;
 
 export enum ETransitionType {
   Cut = 'cut_transition',
   Fade = 'fade_transition',
   Swipe = 'swipe_transition',
+  Shuffle = 'shuffle_transition',
   Slide = 'slide_transition',
   FadeToColor = 'fade_to_color_transition',
   LumaWipe = 'wipe_transition',
   Stinger = 'obs_stinger_transition',
+  Motion = 'motion_transition',
 }
 
 interface ITransitionsState {
@@ -29,11 +38,16 @@ interface ITransitionsState {
   studioMode: boolean;
 }
 
-interface ITransition {
+export interface ITransition {
   id: string;
   name: string;
   type: ETransitionType;
   duration: number;
+}
+
+interface IObsTransitionCallbackInfo {
+  id: string;
+  event: 'start' | 'stop';
 }
 
 export interface ITransitionConnection {
@@ -50,6 +64,73 @@ export interface ITransitionCreateOptions {
   duration?: number;
 }
 
+class TransitionsViews extends ViewHandler<ITransitionsState> {
+  getTypes(): { label: string; value: ETransitionType }[] {
+    const types = [
+      { label: $t('Cut'), value: ETransitionType.Cut },
+      { label: $t('Fade'), value: ETransitionType.Fade },
+      { label: $t('Swipe'), value: ETransitionType.Swipe },
+      { label: $t('Slide'), value: ETransitionType.Slide },
+      { label: $t('Fade to Color'), value: ETransitionType.FadeToColor },
+      { label: $t('Luma Wipe'), value: ETransitionType.LumaWipe },
+      { label: $t('Stinger'), value: ETransitionType.Stinger },
+    ];
+
+    if (getOS() === OS.Windows) {
+      types.push({ label: $t('Motion'), value: ETransitionType.Motion });
+      types.push({ label: $t('Shuffle'), value: ETransitionType.Shuffle });
+    }
+
+    return types;
+  }
+
+  getPropertiesForTransition(
+    transitionId: string,
+  ): Partial<{ type: string; duration: number; name: string }> {
+    const found = this.state.transitions.find(tran => tran.id === transitionId);
+    return found || {};
+  }
+
+  /**
+   * Returns true if this connection is redundant.  A redundant
+   * connection has the same from/to scene ids as a connection
+   * earlier in the order.
+   */
+  isConnectionRedundant(id: string) {
+    const connection = this.getConnection(id);
+
+    const match = this.state.connections.find(conn => {
+      return conn.fromSceneId === connection.fromSceneId && conn.toSceneId === connection.toSceneId;
+    });
+
+    return match.id !== connection.id;
+  }
+
+  getConnection(id: string) {
+    return this.state.connections.find(conn => conn.id === id);
+  }
+
+  getTransition(id: string) {
+    return this.state.transitions.find(tran => tran.id === id);
+  }
+
+  get transitions() {
+    return this.state.transitions;
+  }
+
+  get defaultTransitionId() {
+    return this.state.defaultTransitionId;
+  }
+
+  get connections() {
+    return this.state.connections;
+  }
+
+  get studioMode() {
+    return this.state.studioMode;
+  }
+}
+
 export class TransitionsService extends StatefulService<ITransitionsState> {
   static initialState = {
     transitions: [],
@@ -61,6 +142,15 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
   @Inject() windowsService: WindowsService;
   @Inject() scenesService: ScenesService;
   @Inject() sceneCollectionsService: SceneCollectionsService;
+  @Inject() usageStatisticsService: UsageStatisticsService;
+  @Inject() sourcesService: SourcesService;
+  @Inject() videoSettingsService: VideoSettingsService;
+  @Inject() dualOutputService: DualOutputService;
+  @Inject() notificationsService: NotificationsService;
+
+  get views() {
+    return new TransitionsViews(this.state);
+  }
 
   studioModeChanged = new Subject<boolean>();
 
@@ -77,6 +167,17 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
    * to the output while editing is taking place in studio mode.
    */
   sceneDuplicate: obs.IScene;
+
+  /**
+   * This is a previous instance of scene duplicate. The reference
+   * is only valid until the transition is finished.
+   */
+  private oldDuplicate: obs.IScene;
+
+  /**
+   * This is an application's id of duplicated scene from above
+   */
+  currentSceneId: string;
 
   /**
    * Used to prevent studio mode transitions before the current
@@ -98,34 +199,47 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
     this.sceneCollectionsService.collectionWillSwitch.subscribe(() => {
       this.disableStudioMode();
     });
-  }
 
-  getTypes(): IListOption<ETransitionType>[] {
-    return [
-      { title: $t('Cut'), value: ETransitionType.Cut },
-      { title: $t('Fade'), value: ETransitionType.Fade },
-      { title: $t('Swipe'), value: ETransitionType.Swipe },
-      { title: $t('Slide'), value: ETransitionType.Slide },
-      { title: $t('Fade to Color'), value: ETransitionType.FadeToColor },
-      { title: $t('Luma Wipe'), value: ETransitionType.LumaWipe },
-      { title: $t('Stinger'), value: ETransitionType.Stinger },
-    ];
+    obs.NodeObs.RegisterTransitionCallback((objs: IObsTransitionCallbackInfo[]) =>
+      this.handleTransitionCallback(objs),
+    );
+
+    // a video context must be initialized before loading the scene transition
+    const establishedContext = this.videoSettingsService.establishedContext.subscribe(display => {
+      if (display === 'horizontal' && !this.studioModeTransition) this.createStudioModeTransition();
+      establishedContext.unsubscribe();
+    });
   }
 
   enableStudioMode() {
     if (this.state.studioMode) return;
+    if (
+      this.dualOutputService.views.dualOutputMode ||
+      this.dualOutputService.views.showBothDisplays
+    ) {
+      this.notificationsService.actions.push({
+        message: $t('Cannot toggle Studio Mode in Dual Output Mode.'),
+        type: ENotificationType.WARNING,
+        lifeTime: 2000,
+      });
+      return;
+    }
 
+    this.usageStatisticsService.recordFeatureUsage('StudioMode');
     this.SET_STUDIO_MODE(true);
     this.studioModeChanged.next(true);
 
     if (!this.studioModeTransition) this.createStudioModeTransition();
-    const currentScene = this.scenesService.activeScene.getObsScene();
-    this.sceneDuplicate = currentScene.duplicate(uuid(), obs.ESceneDupType.Copy);
+    this.currentSceneId = this.scenesService.views.activeScene.id;
+    const currentScene = this.scenesService.views.activeScene.getObsScene();
+    this.sceneDuplicate = currentScene.duplicate('scene_copy_' + uuid(), obs.ESceneDupType.Copy);
 
-    // Immediately switch to the duplicated scene
+    // Immediately switch to the duplicated scene (Right window, Live)
     this.getCurrentTransition().set(this.sceneDuplicate);
 
+    // Left window, Edit. Note: order of these 2 calls is important
     this.studioModeTransition.set(currentScene);
+    obs.Global.addSceneToBackstage(this.studioModeTransition);
   }
 
   disableStudioMode() {
@@ -134,8 +248,17 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
     this.SET_STUDIO_MODE(false);
     this.studioModeChanged.next(false);
 
-    this.getCurrentTransition().set(this.scenesService.activeScene.getObsScene());
+    const currentScene = this.scenesService.views.activeScene;
+    this.getCurrentTransition().set(currentScene.getObsScene());
     this.releaseStudioModeObjects();
+  }
+
+  toggleStudioMode() {
+    if (this.state.studioMode) {
+      this.disableStudioMode();
+    } else {
+      this.enableStudioMode();
+    }
   }
 
   /**
@@ -147,22 +270,43 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
     this.studioModeLocked = true;
 
-    const currentScene = this.scenesService.activeScene.getObsScene();
+    const currentScene = this.scenesService.views.activeScene;
 
-    const oldDuplicate = this.sceneDuplicate;
-    this.sceneDuplicate = currentScene.duplicate(uuid(), obs.ESceneDupType.Copy);
+    obs.Global.removeSceneFromBackstage(currentScene.getSource().getObsInput());
 
-    // TODO: Make this a dropdown box
+    this.oldDuplicate = this.sceneDuplicate;
+    this.sceneDuplicate = currentScene
+      .getObsScene()
+      .duplicate('scene_copy_' + uuid(), obs.ESceneDupType.Copy);
+
     const transition = this.getDefaultTransition();
     const obsTransition = this.obsTransitions[transition.id];
 
     obsTransition.set(this.getCurrentTransition().getActiveSource());
     obs.Global.setOutputSource(0, obsTransition);
-    obsTransition.start(transition.duration, this.sceneDuplicate);
+    obsTransition.start(
+      Math.min(transition.duration, TRANSITION_DURATION_MAX),
+      this.sceneDuplicate,
+    );
+  }
 
-    oldDuplicate.release();
+  /**
+   * Callback that helps track state of transitions in the app
+   */
+  private handleTransitionCallback(callbackInfo: IObsTransitionCallbackInfo[]) {
+    callbackInfo.forEach(info => {
+      const obsTransition = this.obsTransitions[info.id];
+      if (!obsTransition) {
+        return;
+      }
 
-    setTimeout(() => (this.studioModeLocked = false), transition.duration);
+      if (this.studioModeLocked && info.event === 'stop') {
+        this.oldDuplicate.release();
+        this.oldDuplicate = null;
+        this.currentSceneId = this.scenesService.views.activeScene.id;
+        this.studioModeLocked = false;
+      }
+    });
   }
 
   /**
@@ -184,6 +328,7 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
   releaseStudioModeObjects() {
     if (this.studioModeTransition) {
+      obs.Global.removeSceneFromBackstage(this.studioModeTransition);
       this.studioModeTransition.release();
       this.studioModeTransition = null;
     }
@@ -193,16 +338,26 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
     }
   }
 
-  get studioTransitionName() {
+  getStudioTransitionName() {
     if (this.studioModeTransition) {
       return this.studioModeTransition.name;
     }
   }
 
-  transition(sceneAId: string, sceneBId: string) {
+  transition(sceneAId: string | null, sceneBId: string) {
     if (this.state.studioMode) {
-      const scene = this.scenesService.getScene(sceneBId);
+      if (sceneAId && sceneAId !== this.currentSceneId) {
+        const prevScene = this.scenesService.views.getScene(sceneAId);
+        obs.Global.removeSceneFromBackstage(prevScene.getSource().getObsInput());
+      }
+
+      const scene = this.scenesService.views.getScene(sceneBId);
+      if (this.currentSceneId !== sceneBId) {
+        obs.Global.addSceneToBackstage(scene.getSource().getObsInput());
+      }
+
       this.studioModeTransition.set(scene.getObsScene());
+
       return;
     }
 
@@ -212,19 +367,23 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
     // place when we try to transition.
     this.ensureTransition();
 
-    const obsScene = this.scenesService.getScene(sceneBId).getObsScene();
+    const obsScene = this.scenesService.views.getScene(sceneBId).getObsScene();
     const transition = this.getConnectedTransition(sceneAId, sceneBId);
     const obsTransition = this.obsTransitions[transition.id];
 
+    if (transition.type === ETransitionType.Motion) {
+      this.usageStatisticsService.recordFeatureUsage('MotionTransition');
+    }
+
     if (sceneAId) {
-      obsTransition.set(this.scenesService.getScene(sceneAId).getObsScene());
+      obsTransition.set(this.scenesService.views.getScene(sceneAId).getObsScene());
       obs.Global.setOutputSource(0, obsTransition);
-      obsTransition.start(transition.duration, obsScene);
+      obsTransition.start(Math.min(transition.duration, TRANSITION_DURATION_MAX), obsScene);
     } else {
       const defaultTransition = obs.TransitionFactory.create(ETransitionType.Cut, uuid());
       defaultTransition.set(obsScene);
       obs.Global.setOutputSource(0, defaultTransition);
-      obsTransition.start(transition.duration, obsScene);
+      obsTransition.start(Math.min(transition.duration, TRANSITION_DURATION_MAX), obsScene);
       defaultTransition.release();
     }
   }
@@ -263,7 +422,17 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
   }
 
   shutdown() {
-    Object.values(this.obsTransitions).forEach(tran => tran.release());
+    if (this.state.studioMode) this.disableStudioMode();
+    Object.keys(this.obsTransitions).forEach(id => {
+      this.propertiesManagers[id]?.destroy();
+      delete this.propertiesManagers[id];
+      this.obsTransitions[id].release();
+      delete this.obsTransitions[id];
+    });
+    if (this.oldDuplicate) {
+      this.oldDuplicate.release();
+      this.oldDuplicate = null;
+    }
     this.releaseStudioModeObjects();
     obs.Global.setOutputSource(0, null);
   }
@@ -273,7 +442,7 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
    */
   ensureTransition() {
     if (this.state.transitions.length === 0) {
-      this.createTransition(ETransitionType.Cut, 'Global Transition');
+      this.createTransition(ETransitionType.Cut, $t('Global Transition'));
     }
   }
 
@@ -299,6 +468,9 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
   }
 
   createTransition(type: ETransitionType, name: string, options: ITransitionCreateOptions = {}) {
+    if (!this.views.getTypes().find(t => t.value === type)) {
+      type = ETransitionType.Cut;
+    }
     const id = options.id || uuid();
     const transition = obs.TransitionFactory.create(type, id, options.settings || {});
     const manager = new DefaultManager(transition, options.propertiesManagerSettings || {});
@@ -336,11 +508,15 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
   }
 
   deleteTransition(id: string) {
-    this.propertiesManagers[id].destroy();
-    delete this.propertiesManagers[id];
+    if (this.propertiesManagers[id]) {
+      this.propertiesManagers[id].destroy();
+      delete this.propertiesManagers[id];
+    }
 
-    this.obsTransitions[id].release();
-    delete this.obsTransitions[id];
+    if (this.obsTransitions[id]) {
+      this.obsTransitions[id].release();
+      delete this.obsTransitions[id];
+    }
     this.DELETE_TRANSITION(id);
   }
 
@@ -380,7 +556,7 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
       fromSceneId: fromId,
       toSceneId: toId,
     });
-    return this.getConnection(id);
+    return this.views.getConnection(id);
   }
 
   updateConnection(id: string, patch: Partial<ITransitionConnection>) {
@@ -389,25 +565,6 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
   deleteConnection(id: string) {
     this.DELETE_CONNECTION(id);
-  }
-
-  /**
-   * Returns true if this connection is redundant.  A redundant
-   * connection has the same from/to scene ids as a connection
-   * earlier in the order.
-   */
-  isConnectionRedundant(id: string) {
-    const connection = this.getConnection(id);
-
-    const match = this.state.connections.find(conn => {
-      return conn.fromSceneId === connection.fromSceneId && conn.toSceneId === connection.toSceneId;
-    });
-
-    return match.id !== connection.id;
-  }
-
-  getConnection(id: string) {
-    return this.state.connections.find(conn => conn.id === id);
   }
 
   setDuration(id: string, duration: number) {
@@ -447,14 +604,49 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
       });
   }
 
+  /**
+   * Gets locked states for all transitions
+   */
+  getLockedStates() {
+    const states: Dictionary<boolean> = {};
+
+    this.state.transitions.forEach(transition => {
+      states[transition.id] = this.getPropertiesManagerSettings(transition.id).locked;
+    });
+
+    return states;
+  }
+
+  /**
+   * Sets a single source to the global output.
+   * Useful for isolating the performance impact of a single source.
+   * WARNING: Only used by the Theme Audit system. Should
+   * never be used for real production systems and should never
+   * be done while live.
+   * @param sourceId the source id to inspect
+   */
+  inspectSource(sourceId: string) {
+    const source = this.sourcesService.views.getSource(sourceId);
+    if (!source) return;
+
+    obs.Global.setOutputSource(0, source.getObsInput());
+  }
+
+  cancelInspectSource() {
+    this.transition(null, this.scenesService.views.activeSceneId);
+  }
+
   @mutation()
   private ADD_TRANSITION(id: string, name: string, type: ETransitionType, duration: number) {
-    this.state.transitions.push({
-      id,
-      name,
-      type,
-      duration,
-    });
+    this.state.transitions = [
+      ...this.state.transitions,
+      {
+        id,
+        name,
+        type,
+        duration,
+      },
+    ];
   }
 
   @mutation()
@@ -463,6 +655,8 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
     if (transition) {
       Object.keys(patch).forEach(key => {
+        // TODO: index
+        // @ts-ignore
         transition[key] = patch[key];
       });
     }
@@ -488,7 +682,7 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
   @mutation()
   private ADD_CONNECTION(connection: ITransitionConnection) {
-    this.state.connections.push(connection);
+    this.state.connections = [...this.state.connections, connection];
   }
 
   @mutation()
@@ -497,6 +691,8 @@ export class TransitionsService extends StatefulService<ITransitionsState> {
 
     if (connection) {
       Object.keys(patch).forEach(key => {
+        // TODO: index
+        // @ts-ignore
         connection[key] = patch[key];
       });
     }

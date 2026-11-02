@@ -1,0 +1,303 @@
+import { test, TExecutionContext, useWebdriver } from '../helpers/webdriver';
+import { logIn, withPoolUser } from '../helpers/webdriver/user';
+import { sleep } from '../helpers/sleep';
+import {
+  click,
+  clickButton,
+  clickIfDisplayed,
+  clickWhenDisplayed,
+  focusMain,
+  isDisplayed,
+  getNumElements,
+  waitForDisplayed,
+} from '../helpers/modules/core';
+import { getApiClient } from '../helpers/api-client';
+import { ScenesService } from '../../app/services/api/external-api/scenes';
+import { advancePastOnboardingLogin } from '../helpers/modules/onboarding';
+
+/**
+ * Testing default sources for onboarding and new users
+ * @remark New users on their first login have special handling. To optimize testing,
+ * some of the cases are tested within existing tests.
+ *
+ * CASE 1: Old user logged in during onboarding, no theme installed (Go through onboarding)
+ * CASE 2: Old user logged in during onboarding, theme installed (Go through onboarding and install theme)
+ * CASE 3: New user logged in during onboarding, no theme installed (Go through onboarding as a new user)
+ * CASE 4: New user logged in during onboarding, theme installed (Go through onboarding as a new user and install theme)
+ * CASE 5: New user, no theme installed, skip hardware config
+ * CASE 6: No user logged in during onboarding, theme installed, then log in new user (Login new user after onboarding skipped and theme installed)
+ * CASE 7: No user logged in during onboarding, no theme installed, then log in an old user (Scene-collections cloud-backup) <- tested in the cloud-backup test
+ */
+
+// not a react hook
+// eslint-disable-next-line react-hooks/rules-of-hooks
+useWebdriver({ skipOnboarding: false, noSync: true });
+
+enum HardwareConfigButtons {
+  Continue = 'Continue',
+  Skip = 'Skip',
+}
+
+enum DefaultSourcesCheck {
+  HasDefaultSources,
+  CheckOverlaySources,
+  NoDefaultSources,
+}
+
+async function confirmDefaultSources(
+  t: TExecutionContext,
+  defaultSourcesCheck = DefaultSourcesCheck.HasDefaultSources,
+) {
+  const api = await getApiClient();
+  const scenesService = api.getResource<ScenesService>('ScenesService');
+  const defaultSources = ['Webcam'];
+  const numDefaultSources = defaultSources.length;
+
+  const numSceneItems = scenesService.activeScene
+    .getItems()
+    .map(item => item.getModel())
+    .reduce((sources, item) => {
+      // only track number of sources that should be
+      if (sources[item.sourceId] && defaultSources.includes(item.name)) {
+        sources[item.sourceId] += 1;
+      } else {
+        sources[item.sourceId] = 1;
+      }
+      return sources;
+    }, {} as { [sourceId: string]: number });
+
+  switch (defaultSourcesCheck) {
+    case DefaultSourcesCheck.HasDefaultSources:
+      // confirm this is a single output scene collection by confirming that each source
+      // is only used by a single scene item. This is because dual output scene collection
+      // scene items share a single source.
+      for (const [sourceId, count] of Object.entries(numSceneItems)) {
+        t.is(count, 1, `Scene has only once scene item with source ${sourceId}`);
+      }
+
+      t.is(
+        Object.keys(numSceneItems).length,
+        numDefaultSources,
+        'Scene has correct default sources',
+      );
+      break;
+    case DefaultSourcesCheck.CheckOverlaySources:
+      {
+        // overlays installed during onboarding should have default sources more or less sources than the defaults
+        const numDefaultSources = Object.keys(numSceneItems).filter(
+          name => defaultSources.includes(name) && numSceneItems[name] > 1,
+        ).length;
+
+        t.not(Object.keys(numSceneItems).length, numDefaultSources, 'Scene has no default sources');
+      }
+      break;
+    case DefaultSourcesCheck.NoDefaultSources:
+      t.is(Object.keys(numSceneItems).length, 0, 'Scene should have no default sources');
+      break;
+  }
+}
+
+/**
+ * Helper function to go through the onboarding flow through the login step
+ * @param t Test execution context
+ * @param fn Function to run after onboarding is complete
+ * @remark This function is a simplification of the `Go through onboarding` test
+ */
+async function goThroughOnboarding(t: TExecutionContext, fn: () => Promise<void>) {
+  const user = await advancePastOnboardingLogin(t);
+
+  await waitForDisplayed('h1=Connect Platforms');
+  await clickIfDisplayed('button=Skip');
+
+  await waitForDisplayed('div[data-testid=choose-free-plan-btn]', { timeout: 60000 });
+  await clickIfDisplayed('div[data-testid=choose-free-plan-btn]');
+  await withPoolUser(user, async () => {
+    await fn();
+  });
+}
+
+/*
+ * Helper function to go through the onboarding flow from the login step to the end
+ * @param installTheme - Whether to install a theme during onboarding
+ */
+async function finishOnboarding(
+  installTheme = false,
+  HardwareConfigButton: HardwareConfigButtons = HardwareConfigButtons.Continue,
+) {
+  await waitForDisplayed('h1=Set Up Your Mic & Webcam');
+  await clickButton(HardwareConfigButton);
+
+  await waitForDisplayed('h1=Choose Your Overlay');
+  if (installTheme) {
+    await clickWhenDisplayed(
+      '//div[contains(@class,"slick-active")]//button[normalize-space(.)="Install"]',
+      { timeout: 15000 },
+    );
+  } else {
+    await clickButton('Skip');
+  }
+
+  await waitForDisplayed('h1=Choose Your Overlay', { reverse: true, timeout: 30000 });
+  if (!installTheme && HardwareConfigButton === HardwareConfigButtons.Continue) {
+    // Device setup releases its temporary webcam before asynchronously adding the real source.
+    await waitForDisplayed('div[data-role=source]', { timeout: 10000 });
+  }
+}
+
+test('Go through onboarding', async t => {
+  await focusMain();
+
+  if (!(await isDisplayed('h1=Welcome to Streamlabs Desktop', { timeout: 10000 }))) {
+    t.fail('Onboarding welcome page not shown');
+    return;
+  }
+  await clickWhenDisplayed('a=Log In', { timeout: 5000 });
+  await waitForDisplayed('h1=Log In');
+
+  // Signup page
+  t.true(await isDisplayed('h1=Log In'), 'Shows login page by default');
+  t.true(
+    await isDisplayed('button*=Log in with Streamlabs ID'),
+    'Has a log in with Streamlabs ID button',
+  );
+  // "Or log in with a platform" is a <span>, not a <button>
+  t.true(
+    await isDisplayed('span=Or log in with a platform'),
+    'Has an "Or log in with a platform" label',
+  );
+
+  t.true(await isDisplayed('button=Twitch'), 'Shows Twitch button');
+  t.true(await isDisplayed('button=YouTube'), 'Shows YouTube button');
+  t.true(await isDisplayed('button=Facebook'), 'Shows Facebook button');
+  t.true(await isDisplayed('button=TikTok'), 'Shows TikTok button');
+  t.true(await isDisplayed('button=Instagram'), 'Shows Instagram button');
+  t.true(await isDisplayed('button=X'), 'Shows X (Twitter) button');
+  t.true(await isDisplayed('button=Kick'), 'Shows Kick button');
+  t.true(await isDisplayed('button=NimoTV'), 'Shows NimoTV button');
+
+  t.true(await isDisplayed('button=Back'), 'Has a link to go back to Sign Up');
+
+  // Complete login
+  await waitForDisplayed('button=Twitch');
+  const user = await logIn(t, 'twitch', { prime: false }, false, true);
+
+  // Fake authentication bypasses the login button's navigation callback.
+  await clickButton('Back');
+  await waitForDisplayed('h1=Welcome to Streamlabs Desktop');
+  await clickWhenDisplayed('a=Log In', { timeout: 5000 });
+
+  // Finish onboarding flow
+  await withPoolUser(user, async () => {
+    await waitForDisplayed('h1=Connect Platforms');
+    await clickIfDisplayed('button=Skip');
+
+    await waitForDisplayed('div[data-testid=choose-free-plan-btn]', { timeout: 60000 });
+    await clickIfDisplayed('div[data-testid=choose-free-plan-btn]');
+
+    await finishOnboarding(false, HardwareConfigButtons.Skip);
+
+    t.true(await isDisplayed('span=Sources'), 'Sources selector is visible');
+
+    // Confirm sources
+    t.is(
+      await getNumElements('div[data-role=source]'),
+      0,
+      'Old user onboarded without theme has no sources',
+    );
+  });
+
+  t.pass();
+});
+
+// NOTE: Skipped when running remotely but this test is functional
+test.skip('Go through onboarding and install theme', async t => {
+  await focusMain();
+
+  if (!(await isDisplayed('h1=Welcome to Streamlabs Desktop'))) {
+    t.fail('Onboarding welcome page not shown');
+    return;
+  }
+  await clickWhenDisplayed('button=Get Started', { timeout: 5000 });
+  await clickIfDisplayed('button=Skip');
+
+  // Confirm sources
+  t.not(await getNumElements('div[data-role=source]'), 0, 'Theme installed before login');
+
+  // login new user after onboarding
+  await clickIfDisplayed('li[data-testid=nav-auth]');
+
+  await isDisplayed('button=Log in with Twitch');
+  await logIn(t, 'twitch', { prime: false }, false, false, true);
+  await sleep(1000);
+
+  // Confirm switched to scene with default sources
+  await confirmDefaultSources(t);
+
+  t.pass();
+});
+
+test('Go through onboarding as a new user', async t => {
+  await goThroughOnboarding(t, async () => {
+    await finishOnboarding();
+    await confirmDefaultSources(t);
+  });
+
+  t.pass();
+});
+
+// NOTE: Skipped when running remotely but this test is functional
+test.skip('Go through onboarding as a new user and install theme', async t => {
+  await goThroughOnboarding(t, async () => {
+    await finishOnboarding(true);
+    await confirmDefaultSources(t, DefaultSourcesCheck.CheckOverlaySources);
+  });
+
+  t.pass();
+});
+
+// TODO: refactor to updated onboarding flow and make specific assertions here once re-enabled
+test.skip('Go through the onboarding and autoconfig', async t => {
+  const app = t.context.app;
+  await focusMain();
+
+  if (!(await isDisplayed('h2=Live Streaming'))) return;
+
+  await click('h2=Live Streaming');
+  await click('button=Continue');
+
+  // Click on Login on the signup page, then wait for the auth screen to appear
+  await click('a=Login');
+  // prettier-ignore
+  await (await app.client.$('button=Log in with Twitch')).isExisting();
+
+  await logIn(t, 'twitch', { prime: false }, false, true);
+  await sleep(1000);
+
+  // We seem to skip the login step after login internally
+  await clickIfDisplayed('button=Skip');
+
+  // Don't Import from OBS
+  await clickIfDisplayed('div=Start Fresh');
+
+  // Skip hardware config
+  await waitForDisplayed('h1=Set up your mic & webcam');
+  await clickIfDisplayed('button=Skip');
+
+  // Skip picking a theme
+  await waitForDisplayed('h1=Add an Overlay');
+  await clickIfDisplayed('button=Skip');
+
+  // Start auto config
+  // temporarily disable auto config until migrate to new api
+  // t.true(await (await app.client.$('button=Start')).isExisting());
+  // await (await app.client.$('button=Start')).click();
+
+  // Skip purchasing prime
+  await waitForDisplayed('div[data-testid=choose-free-plan-btn]', { timeout: 60000 });
+  await click('div[data-testid=choose-free-plan-btn]');
+
+  await waitForDisplayed('span=Sources', { timeout: 60000 });
+
+  // success?
+  t.true(await (await app.client.$('span=Sources')).isDisplayed(), 'Sources selector is visible');
+});

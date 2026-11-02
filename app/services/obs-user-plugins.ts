@@ -1,8 +1,8 @@
 import { Service } from './core/service';
 import fs from 'fs';
 import path from 'path';
-import electron from 'electron';
 import * as obs from '../../obs-api';
+import * as remote from '@electron/remote';
 
 // WARNING: This service is initialized extremely early
 // and should not import any other services.
@@ -10,13 +10,14 @@ import * as obs from '../../obs-api';
 export class ObsUserPluginsService extends Service {
   async initialize() {
     // Make a best effort but don't stop SLOBS from loading
+    // Make a best effort but don't stop SLOBS from loading
     try {
       await this.ensureDirectory(this.pluginsBaseDir);
       await this.ensureDirectory(this.obsPluginsDir);
       await this.ensureDirectory(this.pluginsDir);
       await this.ensureDirectory(this.dataBaseDir);
       await this.ensureDirectory(this.dataDir);
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('Error creating plugin directories', e);
     }
   }
@@ -40,7 +41,7 @@ export class ObsUserPluginsService extends Service {
   }
 
   private get appData() {
-    return electron.remote.app.getPath('appData');
+    return remote.app.getPath('appData');
   }
 
   private get pluginsBaseDir() {
@@ -56,7 +57,7 @@ export class ObsUserPluginsService extends Service {
   }
 
   private async ensureDirectory(dirPath: string) {
-    return new Promise((resolve, reject) => {
+    return new Promise<void>((resolve, reject) => {
       fs.exists(dirPath, exists => {
         if (exists) {
           resolve();

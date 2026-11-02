@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Media yang Dilarang",
+  "Price Per Second": "Harga Per Detik",
+  "Min. Amount to Share": "Jumlah Min. untuk Dibagi",
+  "Max Duration": "Durasi Maks.",
+  "Buffer Time": "Waktu Buffer",
+  "Spam Security": "Keamanan Spam",
+  "The time between videos the next video has to buffer.": "Waktu antara video dan video berikutnya harus ada buffer.",
+  "Manage Media Settings": "Kelola Pengaturan Media",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "Jumlah minimum yang harus didonasikan seorang donatur agar bisa berbagi media. Jumlah default adalah US$5,00"
+}

@@ -1,0 +1,407 @@
+import {
+  ExecuteInWorkerProcess,
+  PersistentStatefulService,
+  ViewHandler,
+  mutation,
+} from 'services/core';
+import * as obs from '../../obs-api';
+import path from 'path';
+import { getChecksum } from 'util/requests';
+import { byOS, OS } from 'util/operating-systems';
+import { Inject } from 'services/core/injector';
+import { UsageStatisticsService, SourcesService, ScenesService, AppService } from 'app-services';
+import * as remote from '@electron/remote';
+import { Subject } from 'rxjs';
+import { VCamOutputType } from 'obs-studio-node';
+import { EOBSOutputType, EOBSOutputSignal, IOBSOutputSignalInfo } from './core/signals';
+import os from 'os';
+import { SignalsService } from './signals-manager';
+import { $t } from 'services/i18n';
+import { videoOutputCoordinator } from 'services/video-output-coordinator';
+
+const PLUGIN_PLIST_PATH =
+  '/Library/CoreMediaIO/Plug-Ins/DAL/vcam-plugin.plugin/Contents/Info.plist';
+
+const INTERNAL_PLIST_PATH =
+  'node_modules/obs-studio-node/data/obs-plugins/slobs-virtual-cam/Info.plist';
+
+export enum EVirtualWebcamPluginInstallStatus {
+  Installed = 'installed',
+  NotPresent = 'notPresent',
+  Outdated = 'outdated',
+}
+
+enum InstallationErrorCodes {
+  OSSystemExtensionErrorUnknown = 1,
+  OSSystemExtensionErrorMissingEntitlement = 2,
+  OSSystemExtensionErrorUnsupportedParentBundleLocation = 3,
+  OSSystemExtensionErrorExtensionNotFound = 4,
+  OSSystemExtensionErrorExtensionMissingIdentifier = 5,
+  OSSystemExtensionErrorDuplicateExtensionIdentifer = 6,
+  OSSystemExtensionErrorUnknownExtensionCategory = 7,
+  OSSystemExtensionErrorCodeSignatureInvalid = 8,
+  OSSystemExtensionErrorValidationFailed = 9,
+  OSSystemExtensionErrorForbiddenBySystemPolicy = 10,
+  OSSystemExtensionErrorRequestCanceled = 11,
+  OSSystemExtensionErrorRequestSuperseded = 12,
+  OSSystemExtensionErrorAuthorizationRequired = 13,
+  RebootRequired = 100, // slobs-virtualcam-installer custom error
+  UserApprovalRequired = 101, // slobs-virtualcam-installer custom error
+  MacOS13Unavailable = 102,
+  UnknownError = 999, // slobs-virtualcam-installer custom error
+}
+
+export type TVirtualWebcamPluginInstallStatus =
+  | keyof typeof EVirtualWebcamPluginInstallStatus
+  | null;
+
+interface IVirtualWebcamServiceState {
+  running: boolean;
+  outputType: VCamOutputType;
+  outputSelection: string;
+  installStatus: EVirtualWebcamPluginInstallStatus;
+}
+
+export class VirtualWebcamService extends PersistentStatefulService<IVirtualWebcamServiceState> {
+  @Inject() appService: AppService;
+  @Inject() usageStatisticsService: UsageStatisticsService;
+  @Inject() signalsService: SignalsService;
+
+  static defaultState: IVirtualWebcamServiceState = {
+    running: false,
+    outputType: VCamOutputType.ProgramView,
+    outputSelection: '',
+    installStatus: EVirtualWebcamPluginInstallStatus.NotPresent,
+  };
+
+  static filter(state: IVirtualWebcamServiceState): IVirtualWebcamServiceState {
+    const type = Number(state.outputType);
+    const outputType = [
+      VCamOutputType.ProgramView,
+      VCamOutputType.SceneOutput,
+      VCamOutputType.SourceOutput,
+    ].includes(type)
+      ? type
+      : VCamOutputType.ProgramView;
+
+    // Only the selected output survives a restart. Installation and running status
+    // must be determined by the new process, not restored from the previous one.
+    return {
+      ...this.defaultState,
+      outputType,
+      outputSelection:
+        outputType !== VCamOutputType.ProgramView && typeof state.outputSelection === 'string'
+          ? state.outputSelection
+          : '',
+    };
+  }
+
+  runningChanged = new Subject<boolean>();
+  installStatusChanged = new Subject<EVirtualWebcamPluginInstallStatus>();
+  signalInfoChanged = new Subject<IOBSOutputSignalInfo>();
+
+  init(): void {
+    super.init();
+    this.appService.shutdownStarted.subscribe(() => this.stop());
+
+    byOS({
+      [OS.Windows]: () => {
+        this.setInstallStatus();
+      },
+      [OS.Mac]: () => {
+        const result = obs.NodeObs.OBS_service_isVirtualCamPluginInstalled();
+        if (result === obs.EVcamInstalledStatus.Installed) {
+          // Initialize the virtual cam
+          this.signalsService.addCallback(this.handleSignalOutput);
+
+          obs.NodeObs.OBS_service_createVirtualCam();
+          this.signalInfoChanged.subscribe((signalInfo: IOBSOutputSignalInfo) => {
+            if (
+              signalInfo.type === EOBSOutputType.VirtualCam &&
+              signalInfo.signal === EOBSOutputSignal.Activate // EOBSOutputSignal.Activate indicates mac-virtualcam is initialized
+            ) {
+              console.log(`virtual cam init signalInfo: ${signalInfo.signal}`);
+              this.setInstallStatus();
+            }
+          });
+        }
+      },
+    });
+  }
+
+  protected handleSignalOutput = (info: IOBSOutputSignalInfo) => {
+    this.signalInfoChanged.next(info);
+  };
+
+  get views() {
+    return new VirtualWebcamViews(this.state);
+  }
+
+  private handleUnknownVirtualCamError(error: unknown) {
+    console.error('Caught OBS_service_startVirtualCam error:', error);
+    let errorMessage = '';
+    byOS({
+      [OS.Windows]: () => {
+        errorMessage = $t('Unable to start virtual camera.');
+      },
+      [OS.Mac]: () => {
+        const darwinVersion = os.release().split('.')[0]; // Extract the major version number
+        const isMacOS15OrGreater = Number(darwinVersion) >= 15;
+        if (isMacOS15OrGreater) {
+          errorMessage = $t(
+            'Unable to start virtual camera.\n\nYou may need to enable permissions. To do this, go to System Settings → General → Login Items & Extensions → Camera Extensions.',
+          );
+        } else {
+          errorMessage = $t(
+            'Unable to start virtual camera.\n\nYou may need to enable permissions. To do this, go to System Settings → Privacy & Security → Security.',
+          );
+        }
+      },
+    });
+
+    remote.dialog.showErrorBox($t('Virtual Webcam'), errorMessage);
+  }
+
+  // Returns true if the camera extension is successfully installed. If not, a message is displayed to the user.
+  private tryInstallSystemExtension() {
+    const errorCode = obs.NodeObs.OBS_service_installVirtualCamPlugin();
+    if (errorCode > 0) {
+      const errorMessage = this.getInstallErrorMessage(errorCode);
+      remote.dialog.showErrorBox($t('Virtual Webcam'), errorMessage);
+    }
+    return errorCode === 0;
+  }
+
+  private getInstallErrorMessage(errorCode: number) {
+    const codeName = InstallationErrorCodes[errorCode];
+    console.log(`User experienced virtual cam installation error ${errorCode} value ${codeName}`);
+    let errorMessage = '';
+    switch (errorCode) {
+      case InstallationErrorCodes.OSSystemExtensionErrorUnsupportedParentBundleLocation:
+        errorMessage = $t(
+          "Streamlabs Desktop cannot install the virtual camera if it's not in Applications. Please move Streamlabs Desktop to the Applications directory.",
+        );
+        break;
+      case InstallationErrorCodes.RebootRequired:
+        errorMessage = $t(
+          'The installation of the virtual camera will complete after a system reboot.',
+        );
+        break;
+      case InstallationErrorCodes.UserApprovalRequired:
+        {
+          // Get Darwin kernel version from os.release
+          const darwinVersion = os.release().split('.')[0]; // Extract the major version number
+          const isMacOS15OrGreater = Number(darwinVersion) >= 15;
+          if (isMacOS15OrGreater) {
+            errorMessage = $t(
+              'The virtual camera is not installed.\n\nPlease allow Streamlabs Desktop to install the camera system extension in System Settings → General → Login Items & Extensions → Camera Extensions.\n\nYou may need to restart Streamlabs Desktop if this message still appears afterward.',
+            );
+          } else {
+            errorMessage = $t(
+              'The virtual camera is not installed.\n\nPlease allow Streamlabs Desktop to install system software in System Settings → Privacy & Security → Security.\n\nYou may need to restart Streamlabs Desktop if this message still appears afterward.',
+            );
+          }
+        }
+        break;
+      case InstallationErrorCodes.MacOS13Unavailable:
+        errorMessage = $t('Streamlabs Virtual Webcam feature requires macOS 13 or later.');
+        break;
+      default:
+        errorMessage = $t('An error has occured while installing the virtual camera');
+        break;
+    }
+    return errorMessage;
+  }
+
+  /**
+   * Set the virtual camera install status
+   * @remark This method wraps getting the install status in a try/catch block
+   * to prevent infinite loading from errors
+   */
+  @ExecuteInWorkerProcess()
+  setInstallStatus() {
+    try {
+      const installStatus = this.getInstallStatus();
+      this.SET_INSTALL_STATUS(installStatus);
+    } catch (error: unknown) {
+      console.error('Error resolving install status:', error);
+      this.SET_INSTALL_STATUS(EVirtualWebcamPluginInstallStatus.NotPresent);
+    }
+
+    this.installStatusChanged.next(this.state.installStatus);
+  }
+
+  @ExecuteInWorkerProcess()
+  getInstallStatus(): EVirtualWebcamPluginInstallStatus {
+    const result = obs.NodeObs.OBS_service_isVirtualCamPluginInstalled();
+
+    if (result === obs.EVcamInstalledStatus.Installed) {
+      return EVirtualWebcamPluginInstallStatus.Installed;
+    } else if (result === obs.EVcamInstalledStatus.LegacyInstalled) {
+      return EVirtualWebcamPluginInstallStatus.Outdated;
+    } else {
+      return EVirtualWebcamPluginInstallStatus.NotPresent;
+    }
+  }
+
+  @ExecuteInWorkerProcess()
+  install() {
+    byOS({
+      [OS.Windows]: () => {
+        obs.NodeObs.OBS_service_installVirtualCamPlugin();
+
+        this.setInstallStatus();
+      },
+      [OS.Mac]: () => {
+        this.signalsService.addCallback(this.handleSignalOutput);
+
+        if (this.tryInstallSystemExtension()) {
+          this.signalInfoChanged.subscribe((signalInfo: IOBSOutputSignalInfo) => {
+            if (
+              signalInfo.type === EOBSOutputType.VirtualCam &&
+              signalInfo.signal === EOBSOutputSignal.Activate // EOBSOutputSignal.Activate indicates mac-virtualcam is initialized
+            ) {
+              console.log(`virtual cam install signalInfo: ${signalInfo.signal}`);
+              this.setInstallStatus();
+              obs.NodeObs.OBS_service_createVirtualCam();
+            }
+          });
+        }
+      },
+    });
+  }
+
+  @ExecuteInWorkerProcess()
+  uninstall() {
+    const errorCode = obs.NodeObs.OBS_service_uninstallVirtualCamPlugin();
+    if (errorCode > 0) {
+      const codeName = InstallationErrorCodes[errorCode];
+      console.log(`uninstalling virtual camera plugin error: ${errorCode} code: ${codeName}`);
+      remote.dialog.showErrorBox(
+        $t('Virtual Webcam'),
+        $t('An error has occured while uninstalling the virtual camera'),
+      );
+      return;
+    }
+    this.SET_INSTALL_STATUS(EVirtualWebcamPluginInstallStatus.NotPresent);
+    this.SET_OUTPUT(VCamOutputType.ProgramView, '');
+  }
+
+  @ExecuteInWorkerProcess()
+  start() {
+    if (this.state.running || this.appService.state.loading) return;
+
+    let releaseOutputStart = () => {};
+    try {
+      releaseOutputStart = videoOutputCoordinator.beginOutputStart();
+      // Resolve and save the target against the loaded collection before starting,
+      // including starts triggered by a hotkey without opening settings first.
+      this.update(this.state.outputType, this.state.outputSelection);
+      obs.NodeObs.OBS_service_startVirtualCam();
+      this.SET_RUNNING(true);
+      this.runningChanged.next(true);
+    } catch (error: unknown) {
+      this.handleUnknownVirtualCamError(error);
+      return;
+    } finally {
+      releaseOutputStart();
+    }
+
+    this.usageStatisticsService.recordFeatureUsage('VirtualWebcam');
+  }
+
+  @ExecuteInWorkerProcess()
+  stop() {
+    if (!this.state.running) return;
+
+    obs.NodeObs.OBS_service_stopVirtualCam();
+
+    this.SET_RUNNING(false);
+    this.runningChanged.next(false);
+  }
+
+  private getCurrentChecksum() {
+    const internalPlistPath = path.join(remote.app.getAppPath(), INTERNAL_PLIST_PATH);
+    return getChecksum(internalPlistPath);
+  }
+
+  @ExecuteInWorkerProcess()
+  update(type: VCamOutputType, name: string) {
+    const filtered = VirtualWebcamService.filter({
+      ...this.state,
+      outputType: type,
+      outputSelection: name,
+    });
+    const { outputType, outputSelection } = this.views.resolveOutput(
+      filtered.outputType,
+      filtered.outputSelection,
+    );
+    obs.NodeObs.OBS_service_updateVirtualCam(outputType, outputSelection);
+    this.SET_OUTPUT(outputType, outputSelection);
+  }
+
+  @mutation()
+  private SET_RUNNING(running: boolean) {
+    this.state.running = running;
+  }
+
+  @mutation()
+  private SET_OUTPUT(type: VCamOutputType, selection: string) {
+    this.state.outputType = type;
+    this.state.outputSelection = selection;
+  }
+
+  @mutation()
+  private SET_INSTALL_STATUS(installStatus: EVirtualWebcamPluginInstallStatus) {
+    this.state.installStatus = installStatus;
+  }
+}
+class VirtualWebcamViews extends ViewHandler<IVirtualWebcamServiceState> {
+  @Inject() private scenesService: ScenesService;
+  @Inject() private sourcesService: SourcesService;
+
+  get running() {
+    return this.state.running;
+  }
+
+  getOutputSelectionOptions(type: VCamOutputType) {
+    if (type === VCamOutputType.SceneOutput) {
+      return this.scenesService.views.scenes.map(scene => ({ label: scene.name, value: scene.id }));
+    }
+    if (type === VCamOutputType.SourceOutput) {
+      return this.sourcesService.views
+        .getSources()
+        .filter(source => source.type !== 'scene' && source.video)
+        .map(source => ({ label: source.name, value: source.sourceId }));
+    }
+    return [];
+  }
+
+  resolveOutput(type: VCamOutputType, selection: string) {
+    const options = this.getOutputSelectionOptions(type);
+    const target = options.find(option => option.value === selection) ?? options[0];
+    return target
+      ? { outputType: type, outputSelection: target.value }
+      : { outputType: VCamOutputType.ProgramView, outputSelection: '' };
+  }
+
+  get output() {
+    return this.resolveOutput(this.state.outputType, this.state.outputSelection);
+  }
+
+  get outputSelectionOptions() {
+    return this.getOutputSelectionOptions(this.state.outputType);
+  }
+
+  get outputType() {
+    return this.output.outputType.toString();
+  }
+
+  get outputSelection() {
+    return this.output.outputSelection;
+  }
+
+  get installStatus(): EVirtualWebcamPluginInstallStatus {
+    return this.state.installStatus;
+  }
+}

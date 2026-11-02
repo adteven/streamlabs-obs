@@ -1,0 +1,173 @@
+import React, { useState, useEffect } from 'react';
+import cx from 'classnames';
+import Utils from 'services/utils';
+import urlLib from 'url';
+import BrowserView from 'components-react/shared/BrowserView';
+import { GuestApiHandler } from 'util/guest-api-handler';
+import * as remote from '@electron/remote';
+import { Services } from 'components-react/service-provider';
+import { Button } from 'antd';
+import { $t } from 'services/i18n';
+import styles from './PlatformAppStore.m.less';
+import { useVuex } from 'components-react/hooks';
+
+export default function PlatformAppStore(p: {
+  params: { appId?: string; type?: string };
+  className?: string;
+}) {
+  const {
+    UserService,
+    PlatformAppsService,
+    PlatformAppStoreService,
+    NavigationService,
+    HighlighterService,
+    WindowsService,
+    CustomizationService,
+  } = Services;
+
+  const [legacyHighlighterVersion, setLegacyHighlighterVersion] = useState<string | null>(null);
+
+  const { hideStyleBlockers } = useVuex(() => ({
+    hideStyleBlockers: WindowsService.state[Utils.getCurrentUrlParams().windowId].hideStyleBlockers,
+  }));
+
+  const [platformAppsUrl, setPlatformAppsUrl] = useState('');
+  const [currentUrl, setCurrentUrl] = useState<string>('');
+
+  const { theme } = useVuex(() => ({ theme: CustomizationService.state.theme }));
+
+  // Single-use magic link: refetch on theme change so the store re-themes without
+  // replaying a spent login token.
+  useEffect(() => {
+    HighlighterService.actions.return
+      .getLegacyAiHighlighterVersion()
+      .then(setLegacyHighlighterVersion);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function getPlatformAppsUrl() {
+      const url = await UserService.views.appStoreUrl(p.params);
+      if (!url || cancelled) return;
+      setPlatformAppsUrl(url);
+    }
+
+    getPlatformAppsUrl();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [p.params.appId, p.params.type, theme]);
+
+  function onBrowserViewReady(view: Electron.BrowserView) {
+    new GuestApiHandler().exposeApi(view.webContents.id, {
+      reloadProductionApps,
+      openLinkInBrowser,
+      onPaypalAuthSuccess,
+      navigateToApp,
+    });
+
+    view.webContents.setWindowOpenHandler(details => {
+      const protocol = urlLib.parse(details.url).protocol;
+
+      if (protocol === 'http:' || protocol === 'https:') {
+        remote.shell.openExternal(details.url);
+      }
+
+      return { action: 'deny' };
+    });
+
+    view.webContents.on('did-finish-load', () => {
+      if (Utils.isDevMode()) {
+        view.webContents.openDevTools();
+      }
+    });
+
+    view.webContents.session.webRequest.onCompleted(
+      {
+        urls: [
+          // The marketplace store page apps and themes share the `themes/*/install`
+          // endpoint. Reload apps when it reports a completed install.
+          'https://marketplace-api.streamlabs.com/api/v2/themes/*/install',
+          // Watch for the uninstall endpoint to reload apps after an app is
+          // uninstalled as well.
+          'https://platform.streamlabs.com/api/v1/app/*/uninstall',
+        ],
+      },
+      details => {
+        if (details.method === 'POST' && details.url.includes('/themes/')) {
+          PlatformAppsService.actions.loadProductionApps();
+          return;
+        }
+
+        // reload apps after uninstall
+        Promise.resolve(() => PlatformAppsService.actions.refreshProductionApps());
+      },
+    );
+  }
+
+  async function onPaypalAuthSuccess(callback: Function) {
+    PlatformAppStoreService.actions.bindsPaypalSuccessCallback(callback);
+  }
+
+  async function openLinkInBrowser(url: string) {
+    remote.shell.openExternal(url);
+  }
+
+  async function reloadProductionApps() {
+    PlatformAppsService.actions.loadProductionApps();
+  }
+
+  async function navigateToApp(appId: string) {
+    NavigationService.actions.navigate('PlatformAppMainPage', { appId });
+  }
+
+  if (!platformAppsUrl) return <></>;
+
+  const showLegacyHighlighter =
+    currentUrl.includes('installed-apps') && legacyHighlighterVersion !== null;
+
+  return (
+    <>
+      <BrowserView
+        className={cx(styles.browserView, p.className)}
+        style={{
+          height: showLegacyHighlighter ? 'calc(100% - 72px)' : '100%',
+          position: 'absolute',
+          top: 0,
+          right: 0,
+          bottom: 0,
+          left: 0,
+        }}
+        src={platformAppsUrl}
+        onReady={onBrowserViewReady}
+        enableGuestApi
+        reloadOnThemeChange={false}
+        emitUrlChange={setCurrentUrl}
+        hidden={hideStyleBlockers}
+      />
+      {showLegacyHighlighter && (
+        <div className={styles.otherInstalledAppsWrapper}>
+          <div>{$t('Other installed apps:')}</div>
+          <div className={styles.otherAppWrapper}>
+            <div className={styles.textWrapper}>
+              <h3 style={{ margin: 0 }}>AI Highlighter</h3>
+              <p style={{ opacity: 0.3, margin: 0 }}>by Streamlabs</p>
+            </div>
+            <Button
+              size="middle"
+              type="default"
+              onClick={() => {
+                setLegacyHighlighterVersion(null);
+                HighlighterService.actions.uninstallLegacyAiHighlighter();
+              }}
+            >
+              {$t('Uninstall')}
+            </Button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

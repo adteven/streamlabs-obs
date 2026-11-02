@@ -9,16 +9,52 @@ import url from 'url';
 import path from 'path';
 import { PlatformAppsApi } from './api';
 import { lazyModule } from 'util/lazy-module';
-import { GuestApiService } from 'services/guest-api';
+import { GuestApiHandler } from 'util/guest-api-handler';
 import { BehaviorSubject } from 'rxjs';
 import { IBrowserViewTransform } from './api/modules/module';
+import uuid from 'uuid/v4';
+import * as remote from '@electron/remote';
 
 interface IContainerInfo {
+  id: string;
   appId: string;
   slot: EAppPageSlot;
   persistent: boolean;
   container: electron.BrowserView;
   transform: BehaviorSubject<IBrowserViewTransform>;
+  mountedWindows: number[];
+}
+
+/**
+ * Page URLs are just asset URLs that additionally
+ * have an `app_token` in the query params that can
+ * be parsed by our SDK.
+ * @param app The app
+ * @param page The page filename
+ */
+export function getPageUrl(app: ILoadedApp, page: string) {
+  const url = getAssetUrl(app, page);
+  return `${url}?app_token=${app.appToken}`;
+}
+
+/**
+ * Return the URL to an asset inside an app
+ * @param app The app
+ * @param asset The asset
+ */
+export function getAssetUrl(app: ILoadedApp, asset: string) {
+  let url: string;
+
+  const trimmedAsset = trimStart(asset, '/');
+
+  if (app.unpacked) {
+    const trimmed = trim(app.manifest.buildPath, '/ ');
+    url = compact([`http://localhost:${app.devPort}`, trimmed, trimmedAsset]).join('/');
+  } else {
+    url = compact([app.appUrl, trimmedAsset]).join('/');
+  }
+
+  return url;
 }
 
 /**
@@ -30,7 +66,6 @@ export class PlatformContainerManager {
   containers: IContainerInfo[] = [];
 
   @Inject() private userService: UserService;
-  @Inject() private guestApiService: GuestApiService;
 
   @lazyModule(PlatformAppsApi) private apiManager: PlatformAppsApi;
 
@@ -60,7 +95,7 @@ export class PlatformContainerManager {
   unregisterApp(app: ILoadedApp) {
     this.containers.forEach(cont => {
       if (cont.appId === app.id) {
-        this.destroyContainer(cont.container.id);
+        this.destroyContainer(cont.id);
       }
     });
   }
@@ -72,10 +107,11 @@ export class PlatformContainerManager {
     slobsWindowId: string,
   ) {
     const containerInfo = this.getContainerInfoForSlot(app, slot);
-    const win = electron.remote.BrowserWindow.fromId(electronWindowId);
+    const win = remote.BrowserWindow.fromId(electronWindowId);
 
-    // This method was added in our fork
-    (win as any).addBrowserView(containerInfo.container);
+    win.addBrowserView(containerInfo.container);
+
+    containerInfo.mountedWindows.push(electronWindowId);
 
     containerInfo.transform.next({
       ...containerInfo.transform.getValue(),
@@ -84,11 +120,11 @@ export class PlatformContainerManager {
       mounted: true,
     });
 
-    return containerInfo.container.id;
+    return containerInfo.id;
   }
 
-  setContainerBounds(containerId: number, pos: IVec2, size: IVec2) {
-    const info = this.containers.find(cont => cont.container.id === containerId);
+  setContainerBounds(containerId: string, pos: IVec2, size: IVec2) {
+    const info = this.containers.find(cont => cont.id === containerId);
 
     if (!info) return;
 
@@ -106,16 +142,22 @@ export class PlatformContainerManager {
     });
   }
 
-  unmountContainer(containerId: number, electronWindowId: number) {
-    const info = this.containers.find(cont => cont.container.id === containerId);
+  unmountContainer(containerId: string, electronWindowId: number) {
+    const info = this.containers.find(cont => cont.id === containerId);
 
     if (!info) return;
 
     const transform = info.transform.getValue();
 
-    const win = electron.remote.BrowserWindow.fromId(electronWindowId);
-    // This method was added in our fork
-    (win as any).removeBrowserView(info.container);
+    const win = remote.BrowserWindow.fromId(electronWindowId);
+
+    // If the window is already destroyed, the browser view is already removed
+    // and destroyed
+    if (win) {
+      win.removeBrowserView(info.container);
+    }
+
+    info.mountedWindows = info.mountedWindows.filter(id => id !== electronWindowId);
 
     /* If these are different, it means that another window (likely the main)
      * already mounted this view first, so we don't need to do the following
@@ -141,7 +183,7 @@ export class PlatformContainerManager {
   refreshContainers(app: ILoadedApp) {
     this.containers
       .filter(info => info.appId === app.id)
-      .forEach(info => info.container.webContents.reload());
+      .forEach(info => info.container.webContents.loadURL(this.getPageUrlForSlot(app, info.slot)));
   }
 
   private getContainerInfoForSlot(app: ILoadedApp, slot: EAppPageSlot): IContainerInfo {
@@ -149,21 +191,51 @@ export class PlatformContainerManager {
       cont => cont.appId === app.id && cont.slot === slot,
     );
 
-    if (existingContainer) return existingContainer;
+    // Confirming that the existing container still has content loaded
+    // prevents the app from crashing by attempting to access a destroyed
+    // webContents. Not ideal because the alternative is to create a new container,
+    // which loses the state of the previous container. But better than and error
+    // causing a crash.
+    if (existingContainer) {
+      if (existingContainer.container.webContents) return existingContainer;
 
-    return this.createContainer(app, slot);
+      // The view was destroyed out from under us (e.g. a pop-out window closing).
+      // Drop the stale entry, otherwise the replacement reloads each visit.
+      this.containers = this.containers.filter(c => c !== existingContainer);
+    }
+
+    // Keep the persistence of what we're replacing, if present.
+    const persistent =
+      existingContainer?.persistent ??
+      app.manifest.pages.some(
+        page => page.slot === slot && (page.persistent || page.slot === EAppPageSlot.Background),
+      );
+
+    return this.createContainer(app, slot, persistent);
   }
 
   private createContainer(app: ILoadedApp, slot: EAppPageSlot, persistent = false): IContainerInfo {
-    const view = new electron.remote.BrowserView({
+    const opts: Electron.BrowserViewConstructorOptions = {
       webPreferences: {
+        contextIsolation: true,
         nodeIntegration: false,
         partition: this.getAppPartition(app),
-        preload: path.resolve(electron.remote.app.getAppPath(), 'bundles', 'guest-api'),
+        preload: path.resolve(remote.app.getAppPath(), 'bundles', 'guest-api.js'),
+        sandbox: false,
       },
-    });
+    };
+
+    if (app.highlyPrivileged) {
+      opts.webPreferences.nodeIntegration = true;
+      opts.webPreferences.contextIsolation = false;
+    }
+
+    const view = new remote.BrowserView(opts);
+
+    electron.ipcRenderer.sendSync('webContents-enableRemote', view.webContents.id);
 
     const info: IContainerInfo = {
+      id: uuid(),
       slot,
       persistent,
       container: view,
@@ -175,13 +247,12 @@ export class PlatformContainerManager {
         electronWindowId: null,
         slobsWindowId: null,
       }),
+      mountedWindows: [],
     };
 
     if (app.unpacked) view.webContents.openDevTools();
 
-    view.webContents.on('did-finish-load', () => {
-      this.exposeApi(app, view.webContents.id, info.transform);
-    });
+    this.exposeApi(app, view.webContents.id, info.transform);
 
     /**
      * This has to be done from the main process to work properly
@@ -205,56 +276,44 @@ export class PlatformContainerManager {
     return info;
   }
 
-  private destroyContainer(containerId: number) {
-    const info = this.containers.find(cont => cont.container.id === containerId);
+  private destroyContainer(containerId: string) {
+    const info = this.containers.find(cont => cont.id === containerId);
 
     if (!info) return;
 
     // Remove the container from the list of containers
-    this.containers = this.containers.filter(c => c.container.id !== containerId);
+    this.containers = this.containers.filter(c => c.id !== containerId);
 
-    // Electron types are incorrect here.  This method exists and is documented, but
-    // does not appear in the type definitions.
-    (info.container as any).destroy();
+    // Unmount from all windows first (prevents crashes)
+    info.mountedWindows.forEach(winId => {
+      const win = remote.BrowserWindow.fromId(winId);
+      if (win && !win.isDestroyed()) win.removeBrowserView(info.container);
+    });
+
+    // To prevent memory leaks, the `webContents` must be destroyed.
+    // Removing the browser view or closing the window may have already destroyed the `webContents`.
+    // Prevent errors by checking if it still exists before trying to close it.
+    if (!info.container.webContents) return;
+
+    // Destroy the `webContents` like it would be when closing a window.
+    // This is a more graceful way to destroy the `webContents`.
+    info.container.webContents.close();
+
+    if (!info.container.webContents) return;
+
+    // If there was an error destroying it with the `close` method, force destroy it.
+    // This method is undocumented, but it's the only way to force a
+    // browser view to immediately be destroyed.
+    // See: https://github.com/electron/electron/issues/26929
+    // @ts-ignore
+    info.container.webContents.destroy();
   }
 
   private getPageUrlForSlot(app: ILoadedApp, slot: EAppPageSlot) {
     const page = app.manifest.pages.find(page => page.slot === slot);
     if (!page) return null;
 
-    return this.getPageUrl(app, page.file);
-  }
-
-  /**
-   * Page URLs are just asset URLs that additionally
-   * have an `app_token` in the query params that can
-   * be parsed by our SDK.
-   * @param app The app
-   * @param page The page filename
-   */
-  getPageUrl(app: ILoadedApp, page: string) {
-    const url = this.getAssetUrl(app, page);
-    return `${url}?app_token=${app.appToken}`;
-  }
-
-  /**
-   * Return the URL to an asset inside an app
-   * @param app The app
-   * @param asset The asset
-   */
-  getAssetUrl(app: ILoadedApp, asset: string) {
-    let url: string;
-
-    const trimmedAsset = trimStart(asset, '/');
-
-    if (app.unpacked) {
-      const trimmed = trim(app.manifest.buildPath, '/ ');
-      url = compact([`http://localhost:${app.devPort}`, trimmed, trimmedAsset]).join('/');
-    } else {
-      url = compact([app.appUrl, trimmedAsset]).join('/');
-    }
-
-    return url;
+    return getPageUrl(app, page.file);
   }
 
   sessionsInitialized: Dictionary<boolean> = {};
@@ -265,10 +324,10 @@ export class PlatformContainerManager {
    */
   private getAppPartition(app: ILoadedApp) {
     const userId = this.userService.platformId;
-    const partition = `platformApp-${app.id}-${userId}-${app.unpacked}`;
+    const partition = `persist:platformApp-${app.id}-${userId}-${app.unpacked}`;
 
     if (!this.sessionsInitialized[partition]) {
-      const session = electron.remote.session.fromPartition(partition);
+      const session = remote.session.fromPartition(partition);
       const frameUrls: string[] = [];
       let mainFrame = '';
 
@@ -298,26 +357,34 @@ export class PlatformContainerManager {
         }
 
         if (details.resourceType === 'script') {
-          const scriptWhitelist = [
+          const scriptAllowlist = [
             'https://cdn.streamlabs.com/slobs-platform/lib/streamlabs-platform.js',
             'https://cdn.streamlabs.com/slobs-platform/lib/streamlabs-platform.min.js',
           ];
 
-          const scriptDomainWhitelist = [
+          const scriptDomainAllowlist = [
             'www.googletagmanager.com',
             'www.google-analytics.com',
             'widget.intercom.io',
             'js.intercomcdn.com',
+            'cdn.heapanalytics.com',
+            'edge.fullstory.com',
+            'www.youtube.com',
+            'cdn.segment.com',
+            'static.twitchcdn.net',
+            'www.google.com',
+            'www.gstatic.com',
+            'assets.twitch.tv',
           ];
 
           const parsed = url.parse(details.url);
 
-          if (scriptWhitelist.includes(details.url)) {
+          if (scriptAllowlist.includes(details.url)) {
             cb({});
             return;
           }
 
-          if (scriptDomainWhitelist.includes(parsed.hostname)) {
+          if (scriptDomainAllowlist.includes(parsed.hostname)) {
             cb({});
             return;
           }
@@ -333,12 +400,15 @@ export class PlatformContainerManager {
           }
 
           // Let through all chrome dev tools requests
-          if (parsed.protocol === 'chrome-devtools:') {
+          if (parsed.protocol === 'devtools:') {
             cb({});
             return;
           }
 
           // Cancel all other script requests.
+          console.warn(
+            `Canceling request to ${details.url} by app ${app.id}: ${app.manifest.name}`,
+          );
           cb({ cancel: true });
           return;
         }
@@ -362,6 +432,6 @@ export class PlatformContainerManager {
 
     // Namespace under v1 for now.  Eventually we may want to add
     // a v2 API.
-    this.guestApiService.exposeApi(webContentsId, { v1: api });
+    new GuestApiHandler().exposeApi(webContentsId, { v1: api });
   }
 }

@@ -1,10 +1,13 @@
 import { Node } from '../node';
 import { SceneItem } from '../../../scenes';
-import { VideoService } from '../../../video';
+import { VideoSettingsService } from '../../../settings-v2/video';
 import { SourcesService } from '../../../sources';
 import sortBy from 'lodash/sortBy';
 import { IListProperty } from '../../../../../obs-api';
 import { ScalableRectangle } from '../../../../util/ScalableRectangle';
+import { Inject } from 'services/core';
+import { DefaultHardwareService } from 'services/hardware';
+import { byOS, OS } from 'util/operating-systems';
 
 interface ISchema {
   width: number;
@@ -28,27 +31,46 @@ interface IResolution {
 export class WebcamNode extends Node<ISchema, IContext> {
   schemaVersion = 1;
 
-  videoService: VideoService = VideoService.instance;
+  videoSettingsService: VideoSettingsService = VideoSettingsService.instance;
   sourcesService: SourcesService = SourcesService.instance;
+  @Inject() private defaultHardwareService: DefaultHardwareService;
 
   async save(context: IContext) {
-    const rect = new ScalableRectangle(context.sceneItem.getRectangle());
+    const rect = new ScalableRectangle(context.sceneItem.rectangle);
 
     this.data = {
-      width: rect.scaledWidth / this.videoService.baseWidth,
-      height: rect.scaledHeight / this.videoService.baseHeight,
+      width: rect.scaledWidth / this.videoSettingsService.baseWidth,
+      height: rect.scaledHeight / this.videoSettingsService.baseHeight,
     };
   }
 
   async load(context: IContext) {
-    const targetWidth = this.data.width * this.videoService.baseWidth;
-    const targetHeight = this.data.height * this.videoService.baseHeight;
+    const targetWidth = this.data.width * this.videoSettingsService.baseWidth;
+    const targetHeight = this.data.height * this.videoSettingsService.baseHeight;
     const targetAspect = targetWidth / targetHeight;
     const input = context.sceneItem.getObsInput();
     let resolution: IResolution;
 
     if (context.existing) {
-      resolution = this.resStringToResolution(input.settings['resolution']);
+      resolution = byOS({
+        [OS.Windows]: () =>
+          this.resStringToResolution(
+            input.settings['resolution'],
+            input.settings['resolution'],
+            context.sceneItem,
+          ),
+        [OS.Mac]: () => {
+          const selectedResolution = (input.properties.get(
+            'preset',
+          ) as IListProperty).details.items.find(i => i.value === input.settings['preset']);
+
+          return this.resStringToResolution(
+            selectedResolution.name as string,
+            selectedResolution.value as string,
+            context.sceneItem,
+          );
+        },
+      });
     } else {
       resolution = this.performInitialSetup(context.sceneItem);
     }
@@ -86,8 +108,8 @@ export class WebcamNode extends Node<ISchema, IContext> {
   // This selects the video device and picks the best resolution.
   // It should not be performed if context.existing is true
   performInitialSetup(item: SceneItem) {
-    const targetWidth = this.data.width * this.videoService.baseWidth;
-    const targetHeight = this.data.height * this.videoService.baseHeight;
+    const targetWidth = this.data.width * this.videoSettingsService.baseWidth;
+    const targetHeight = this.data.height * this.videoSettingsService.baseHeight;
     const targetAspect = targetWidth / targetHeight;
     const input = item.getObsInput();
 
@@ -95,23 +117,46 @@ export class WebcamNode extends Node<ISchema, IContext> {
     // TODO: Maybe do some string matching to figure out which
     // one is actually the webcam.  For most users, their webcam
     // will be the only option here.
-    const deviceProperty = input.properties.get('video_device_id');
+    const deviceProperty = byOS({
+      [OS.Windows]: () => input.properties.get('video_device_id') as IListProperty,
+      [OS.Mac]: () => input.properties.get('device') as IListProperty,
+    });
 
     // Stop loading if there aren't any devices
     if ((deviceProperty as IListProperty).details.items.length === 0) return;
 
-    const device = (deviceProperty as IListProperty).details.items[0]['value'];
+    const device = this.defaultHardwareService.state.defaultVideoDevice
+      ? this.defaultHardwareService.state.defaultVideoDevice
+      : deviceProperty.details.items.find(i => i.value)?.value;
 
-    input.update({
-      video_device_id: device,
-      res_type: 1,
-    });
+    if (!device) return;
 
     // Figure out which resolutions this device can run at
-    const resolutionOptions = (input.properties.get(
-      'resolution',
-    ) as IListProperty).details.items.map(item => {
-      return this.resStringToResolution(item.value as string);
+    const resolutionOptions = byOS({
+      [OS.Windows]: () => {
+        input.update({ video_device_id: device, res_type: 1 });
+
+        return (input.properties.get('resolution') as IListProperty).details.items.map(
+          resString => {
+            return this.resStringToResolution(
+              resString.value as string,
+              resString.value as string,
+              item,
+            );
+          },
+        );
+      },
+      [OS.Mac]: () => {
+        input.update({ device, use_preset: true });
+
+        return (input.properties.get('preset') as IListProperty).details.items.map(resString => {
+          return this.resStringToResolution(
+            resString.name as string,
+            resString.value as string,
+            item,
+          );
+        });
+      },
     });
 
     // Group resolutions by aspect ratio
@@ -158,7 +203,11 @@ export class WebcamNode extends Node<ISchema, IContext> {
 
   applyResolution(sceneItem: SceneItem, resolution: string) {
     const input = sceneItem.getObsInput();
-    input.update({ resolution });
+
+    byOS({
+      [OS.Windows]: () => input.update({ resolution }),
+      [OS.Mac]: () => input.update({ preset: resolution }),
+    });
   }
 
   applyScaleAndCrop(item: SceneItem, scale: number, crop: ICrop) {
@@ -175,10 +224,15 @@ export class WebcamNode extends Node<ISchema, IContext> {
     });
   }
 
-  resStringToResolution(resString: string): IResolution {
+  resStringToResolution(resString: string, value: string, sceneItem: SceneItem): IResolution {
+    if (!resString) {
+      console.error('No resolution string found.  Performing initial setup instead.');
+      return this.performInitialSetup(sceneItem);
+    }
+
     const parts = resString.split('x');
     return {
-      value: resString,
+      value,
       width: parseInt(parts[0], 10),
       height: parseInt(parts[1], 10),
     };

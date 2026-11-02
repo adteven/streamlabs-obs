@@ -1,0 +1,422 @@
+import {
+  chatIsVisible,
+  clickGoLive,
+  fireIsLiveEvent,
+  fireStreamShiftSocketEvent,
+  prepareToGoLive,
+  stopStream,
+  submit,
+  switchAdvancedMode,
+  waitForSettingsWindowLoaded,
+  waitForStreamStart,
+} from '../../helpers/modules/streaming';
+import { assertFormContains, fillForm, useForm } from '../../helpers/modules/forms';
+import {
+  click,
+  clickButton,
+  clickWhenDisplayed,
+  focusChild,
+  focusMain,
+  isDisplayed,
+  tooltipExists,
+  waitForDisplayed,
+} from '../../helpers/modules/core';
+import { logIn } from '../../helpers/modules/user';
+import { releaseUserInPool, reserveUserFromPool, withUser } from '../../helpers/webdriver/user';
+import {
+  removeCustomDestinations,
+  showSettingsWindow,
+} from '../../helpers/modules/settings/settings';
+import {
+  skipCheckingErrorsInLog,
+  test,
+  TExecutionContext,
+  useWebdriver,
+} from '../../helpers/webdriver';
+import { sleep } from '../../helpers/sleep';
+import { toggleDualOutputMode } from '../../helpers/modules/dual-output';
+
+// not a react hook
+// eslint-disable-next-line react-hooks/rules-of-hooks
+useWebdriver();
+
+async function enableAllPlatforms() {
+  for (const platform of ['twitch', 'youtube']) {
+    await fillForm({ [platform]: true });
+    await sleep(500);
+    await waitForSettingsWindowLoaded();
+  }
+}
+
+async function goLiveWithMultistream(t: TExecutionContext) {
+  await submit();
+  await waitForDisplayed('span=Configure the Multistream service', { timeout: 10000 });
+
+  // YouTube accounts fail for reasons unrelated to the tests. Check for the bypass prompt, which is
+  // shown when setting up a multistream fails, including for errors from YouTube
+  // Try toggling off YouTube and going live again
+  const bypassPrompted = await isDisplayed('button=Bypass and Go Live', { timeout: 5000 });
+
+  if (bypassPrompted) {
+    await clickButton('Close');
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+    await fillForm({ youtube: false });
+    await waitForSettingsWindowLoaded();
+    await submit();
+    await waitForDisplayed('span=Configure the Multistream service', { timeout: 10000 });
+    skipCheckingErrorsInLog();
+  }
+
+  await waitForDisplayed("h1=You're live!", { timeout: 60000 });
+
+  // Confirm chat loads. `chatIsVisible` swallows its own timeout and returns false, so this has
+  // to be asserted — calling it bare checks nothing.
+  // When the bypass fired above, YouTube was dropped and this is a single Twitch target, so the
+  // Multistream tab is legitimately absent; assert the platform chat for that case rather than
+  // dropping the multistream assertion altogether.
+  if (bypassPrompted) {
+    t.true(await chatIsVisible(), 'Chat should load after going live');
+  } else {
+    t.true(await chatIsVisible(true), 'Multistream chat should load after going live');
+  }
+}
+
+async function goLiveWithStreamShift(
+  t: TExecutionContext,
+  testCase?: { multistream?: boolean; force?: boolean },
+) {
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+
+  if (testCase?.multistream) {
+    await enableAllPlatforms();
+    await waitForSettingsWindowLoaded();
+    await fillForm({
+      title: 'Test stream',
+      twitchGame: 'Fortnite',
+      streamShift: true,
+    });
+  } else if (testCase?.force) {
+    // Simulate force going live after detecting a stream on another device
+    await fireIsLiveEvent(true);
+    await focusChild();
+    await waitForDisplayed('span=Force Start', {
+      timeout: 10000,
+      timeoutMsg: 'Force Start button did not appear',
+    });
+    await clickButton('Force Start');
+    await waitForSettingsWindowLoaded();
+    await assertFormContains({ streamShift: false });
+
+    // Wait for the 3-second cooldown to expire
+    await sleep(4000);
+
+    // Now go live normally without stream shift
+    console.log('Force going live after detecting a stream on another device');
+    await submit();
+    await waitForStreamStart();
+    await stopStream();
+  } else {
+    await fillForm({ twitch: true });
+    await waitForSettingsWindowLoaded();
+    await fillForm({ title: 'Test stream', twitchGame: 'Fortnite', streamShift: true });
+  }
+
+  await waitForSettingsWindowLoaded();
+  await submit();
+
+  // Confirm chat loads
+  await waitForStreamStart();
+  await focusMain();
+  await chatIsVisible();
+
+  // Simulate switching stream to another device
+  await fireStreamShiftSocketEvent('streamSwitchRequest', 'testRemoteStreamId');
+  await fireStreamShiftSocketEvent('switchActionComplete', 'testRemoteStreamId');
+  await focusMain();
+  await waitForDisplayed('span=Stream successfully switched', {
+    timeout: 10000,
+    timeoutMsg: 'Stream successfully switched message did not appear',
+  });
+  await clickWhenDisplayed('.ant-modal-close');
+
+  // Simulate switching to the current device
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+  await fireIsLiveEvent(true);
+  await waitForDisplayed('span=Switch to Streamlabs Desktop', {
+    timeout: 10000,
+    timeoutMsg: 'Switch to Streamlabs Desktop button did not appear',
+  });
+  await focusMain();
+  t.true(await isDisplayed('button=Claim Stream'), 'Claim Stream button should be displayed');
+  await focusChild();
+  await click('span=Switch to Streamlabs Desktop');
+
+  await waitForStreamStart();
+  await stopStream();
+}
+
+async function goLiveWithDefaultCodec() {
+  await showSettingsWindow('Output', async () => {
+    await fillForm({ Mode: 'Advanced' });
+    await fillForm('Streaming', { Encoder: 'AOM AV1' });
+    await clickButton('Close');
+  });
+
+  // Try to go live with incompatible codec
+  await clickGoLive();
+
+  // Prevent rate limiting YouTube
+  // Note: This is not necessary for the test but prevents flakiness in CI from rate limiting
+  await waitForSettingsWindowLoaded();
+  await fillForm({
+    youtube: false,
+  });
+  await waitForSettingsWindowLoaded();
+  await submit();
+
+  await waitForDisplayed('span=Incompatible Codec Detected', { timeout: 10000 });
+
+  // Try a new codec the incompatible codec dialog
+  await clickButton('Select Codec');
+
+  // Select another incompatible codec
+  await fillForm('Streaming', { Encoder: 'SVT-AV1' });
+  await clickButton('Close');
+
+  await sleep(1000); // Wait for the settings to apply
+
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+  await submit();
+
+  await waitForDisplayed('span=Incompatible Codec Detected', { timeout: 10000 });
+  await clickButton('Use H.264 Codec');
+
+  await waitForDisplayed('span=Configure the Multistream service', { timeout: 10000 });
+  await waitForDisplayed("h1=You're live!", { timeout: 60000 });
+  await stopStream();
+}
+
+test(
+  'Multistream default mode',
+  withUser('twitch', { prime: true, multistream: true }),
+  async t => {
+    await prepareToGoLive();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    // TODO: this is to rule-out a race condition in platform switching, might not be needed and
+    // can possibly revert back to fillForm with all platforms.
+    await enableAllPlatforms();
+
+    // Shows primary chat switcher when multiple platforms are enabled
+    await waitForDisplayed('[data-name="primaryChat"]', {
+      timeout: 1000,
+      timeoutMsg: 'Primary chat switcher did not appear in go live window',
+    });
+
+    // add settings
+    await fillForm({
+      title: 'Test stream',
+      description: 'Test stream description',
+      twitchGame: 'Fortnite',
+      primaryChat: 'YouTube',
+    });
+
+    await goLiveWithMultistream(t);
+    await stopStream();
+
+    t.pass();
+  },
+);
+
+// The current iteration of the go live window only has one mode, so this test is skipped unless
+// the advanced mode is reactivated.
+test.skip(
+  'Multistream advanced mode',
+  withUser('twitch', { prime: true, multistream: true }),
+  async t => {
+    await prepareToGoLive();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    await enableAllPlatforms();
+
+    await switchAdvancedMode();
+    await waitForSettingsWindowLoaded();
+
+    const twitchForm = useForm('twitch-settings');
+    const twitchSettings = {
+      customEnabled: true,
+      title: 'twitch title',
+      twitchGame: 'Fortnite',
+      // TODO: Re-enable after reauthing userpool
+      // twitchTags: ['100%'],
+    };
+    await twitchForm.fillForm(twitchSettings);
+    await twitchForm.assertFormContains(twitchSettings);
+
+    const youtubeForm = useForm('youtube-settings');
+    const youtubeSettings = {
+      customEnabled: true,
+      title: 'youtube title',
+      description: 'youtube description',
+    };
+    await youtubeForm.fillForm(youtubeSettings);
+    await youtubeForm.assertFormContains(youtubeSettings);
+
+    await goLiveWithMultistream(t);
+    await stopStream();
+
+    t.pass();
+  },
+);
+
+test('Custom stream destinations', async t => {
+  const loggedInUser = await logIn('twitch', { prime: true });
+
+  // fetch a new stream key
+  const user = await reserveUserFromPool(t, 'twitch');
+
+  try {
+    // add new destination
+    await showSettingsWindow('Stream');
+    await click('span=Add Custom Destination');
+
+    const { fillForm } = useForm();
+    await fillForm({
+      name: 'MyCustomDest',
+      url: 'rtmp://live.twitch.tv/app/',
+      streamKey: user.streamKey,
+    });
+    await clickButton('Save');
+    t.true(await isDisplayed('span=MyCustomDest'), 'New destination should be created');
+
+    // update destinations
+    await click('i.fa-pen');
+    await fillForm({
+      name: 'MyCustomDestUpdated',
+    });
+    await clickButton('Save');
+
+    t.true(await isDisplayed('span=MyCustomDestUpdated'), 'Destination should be updated');
+
+    await click('span=Add Custom Destination');
+    await fillForm({
+      name: 'MyCustomDest',
+      url: 'rtmp://live.twitch.tv/app/',
+      streamKey: user.streamKey,
+    });
+    await clickButton('Save');
+
+    // add 3 more destinations (up to 5)
+    for (let i = 0; i < 3; i++) {
+      await click('span=Add Custom Destination');
+      await fillForm({
+        name: `MyCustomDest${i}`,
+        url: 'rtmp://live.twitch.tv/app/',
+        streamKey: user.streamKey,
+      });
+      await clickButton('Save');
+    }
+
+    t.false(
+      await isDisplayed('span=Add Custom Destination'),
+      'Do not allow more than 5 custom dest',
+    );
+
+    // open the GoLiveWindow and check destinations
+    await prepareToGoLive();
+    await clickGoLive();
+    await waitForSettingsWindowLoaded();
+
+    await fillForm({
+      title: 'Test stream',
+      twitchGame: 'Fortnite',
+    });
+
+    t.true(await isDisplayed('div=MyCustomDest'), 'Destination is available');
+    await click('div=MyCustomDest'); // switch the destination on
+
+    await submit();
+    await waitForDisplayed('span=Configure the Multistream service', { timeout: 10000 });
+    await waitForDisplayed("h1=You're live!", { timeout: 60000 });
+    await waitForStreamStart();
+    await stopStream();
+
+    // delete existing destinations
+    await showSettingsWindow('Stream');
+    await removeCustomDestinations();
+    t.false(await isDisplayed('i.fa-trash'), 'Destinations should be removed');
+  } finally {
+    await releaseUserInPool(user);
+    await releaseUserInPool(loggedInUser);
+  }
+});
+
+test('Stream Shift', withUser('twitch', { prime: true, multistream: true }), async t => {
+  await prepareToGoLive();
+
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+
+  // Default stream shift card
+  t.true(await isDisplayed('[data-name="streamShift"]'), 'Stream Shift switch should be visible');
+
+  // Default tooltip stays the same when multiple platforms are enabled
+  await fillForm({ youtube: true });
+  await waitForSettingsWindowLoaded();
+  t.true(
+    await isDisplayed('[data-name="streamShift"]'),
+    'Stream Shift switch should still be visible',
+  );
+
+  // Stream shift disables Enhanced Broadcasting
+  // Note: must be checkd before dual output is enabled, because stream shift is
+  // disabled in dual output mode
+  await fillForm({ isEnhancedBroadcasting: true });
+  await assertFormContains({ streamShift: false, isEnhancedBroadcasting: true });
+  await fillForm({ streamShift: true });
+  await assertFormContains({ streamShift: true, isEnhancedBroadcasting: false });
+  await fillForm({ streamShift: false });
+  await assertFormContains({ streamShift: false, isEnhancedBroadcasting: true });
+  await fillForm({ isEnhancedBroadcasting: false });
+  await clickButton('Close');
+
+  // Dual output tooltip and display selectors
+  await toggleDualOutputMode();
+  await clickGoLive();
+  await waitForSettingsWindowLoaded();
+
+  t.true(
+    await isDisplayed('[data-name="display-selector"]'),
+    'Display selectors should be shown in dual output mode',
+  );
+  t.true(
+    await tooltipExists('[data-name="streamShift"]', '[data-name="dual-output"]', {
+      timeout: 1000,
+    }),
+    'Dual output tooltip did not appear',
+  );
+  await assertFormContains({ streamShift: false });
+  // Reopening after the mode change can disable secondary destinations. Enable
+  // YouTube before interacting with its otherwise hidden display selectors.
+  await fillForm({ youtube: true });
+  await waitForSettingsWindowLoaded();
+  await assertFormContains({ youtube: true });
+  await waitForDisplayed('[data-name="youtubeDisplay"]', { timeout: 10000 });
+  await fillForm({ youtubeDisplay: 'vertical' });
+  await fillForm({ youtubeDisplay: 'horizontal' });
+  await fillForm({ youtube: false });
+  await waitForSettingsWindowLoaded();
+  await clickButton('Close');
+
+  // Return to single output for the other stream shift cases
+  await toggleDualOutputMode(false);
+
+  // TODO: Add testing for events is WIP
+  // await goLiveWithStreamShift(t, { force: true });
+});

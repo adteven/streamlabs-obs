@@ -8,6 +8,7 @@ import { Inject } from '../../services/core/injector';
 import { $t } from 'services/i18n/index';
 import { IInputMetadata } from 'components/shared/inputs';
 import { debounce } from 'lodash-decorators';
+import Scrollable from 'components/shared/Scrollable';
 
 interface ICodeEditorMetadata extends IInputMetadata {
   selectedId?: string;
@@ -18,18 +19,21 @@ interface ICodeEditorMetadata extends IInputMetadata {
   components: {
     CodeInput,
     BoolInput,
+    Scrollable,
   },
 })
 export default class CodeEditor extends Vue {
   @Inject() private widgetsService: WidgetsService;
 
   @Prop()
-  metadata: ICodeEditorMetadata;
+  metadata!: ICodeEditorMetadata;
 
   @Prop()
-  value: IWidgetData;
+  value!: IWidgetData;
 
   editorInputValue =
+    // TODO: index
+    // @ts-ignore
     this.value.settings[`custom_${this.metadata.type}`] ||
     this.selectedVariation.settings[this.alertBoxValue];
 
@@ -63,6 +67,8 @@ export default class CodeEditor extends Vue {
 
   get selectedVariation() {
     if (!this.metadata.selectedAlert || !this.metadata.selectedId) return;
+    // TODO: index
+    // @ts-ignore
     return this.value.settings[this.metadata.selectedAlert].variations.find(
       (variation: IAlertBoxVariation) => variation.id === this.metadata.selectedId,
     );
@@ -71,11 +77,15 @@ export default class CodeEditor extends Vue {
   setCustomCode(newData: IWidgetData) {
     const type = this.metadata.type;
     if (this.selectedVariation) {
+      // TODO: index
+      // @ts-ignore
       const newVariation = newData.settings[this.metadata.selectedAlert].variations.find(
         (variation: IAlertBoxVariation) => variation.id === this.metadata.selectedId,
       );
       newVariation.settings[this.alertBoxValue] = this.editorInputValue;
     } else {
+      // TODO: index
+      // @ts-ignore
       newData.settings[`custom_${type}`] = this.editorInputValue;
     }
 
@@ -91,7 +101,7 @@ export default class CodeEditor extends Vue {
     newData = this.setCustomCode(newData);
     try {
       await this.settingsService.saveSettings(newData.settings);
-    } catch (e) {
+    } catch (e: unknown) {
       this.onFailHandler($t('Save failed, something went wrong.'));
       this.isLoading = false;
       return;
@@ -103,7 +113,9 @@ export default class CodeEditor extends Vue {
 
   restoreDefaults() {
     const type = this.metadata.type;
-    if (!!this.value.custom_defaults) {
+    if (this.value.custom_defaults) {
+      // TODO: index
+      // @ts-ignore
       this.editorInputValue = this.value.custom_defaults[type];
     } else {
       this.onFailHandler($t('This widget does not have defaults.'));

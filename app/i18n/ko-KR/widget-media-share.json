@@ -1,0 +1,11 @@
+{
+  "Banned Media": "금지된 미디어",
+  "Price Per Second": "초당 가격",
+  "Min. Amount to Share": "공유 최소 금액",
+  "Max Duration": "최대 시간",
+  "Buffer Time": "버퍼 시간",
+  "Spam Security": "스팸 보안",
+  "The time between videos the next video has to buffer.": "한 비디오에서 다음 비디오 사이의 버퍼 시간입니다.",
+  "Manage Media Settings": "미디어 설정 관리",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "후원자가 미디어 공유를 위해 후원해야 하는 최소 금액입니다. 기본값은 $5.00 USD입니다"
+}

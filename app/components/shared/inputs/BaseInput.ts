@@ -1,23 +1,30 @@
 import Vue from 'vue';
 import cloneDeep from 'lodash/cloneDeep';
 import uuid from 'uuid/v4';
-import { IInputMetadata } from './index';
-import ValidatedForm from './ValidatedForm.vue';
+import { EInputType, IInputMetadata } from './index';
+import ValidatedForm from './ValidatedForm';
 import TsxComponent from 'components/tsx-component';
 
 export abstract class BaseInput<
   TValueType,
-  TMetadataType extends IInputMetadata
-> extends TsxComponent<{
-  metadata: TMetadataType;
-  value?: TValueType;
-  title?: string;
-  onInput?: Function;
-}> {
+  TMetadataType extends IInputMetadata,
+  TProps extends any = {}
+> extends TsxComponent<
+  {
+    metadata?: TMetadataType;
+    value?: TValueType;
+    title?: string;
+    type?: EInputType;
+    onInput?: Function;
+    onFocus?: () => void;
+    onBlur?: () => void;
+  } & TProps
+> {
   abstract readonly value: TValueType;
   abstract readonly title: string;
   abstract readonly metadata: TMetadataType;
   onInput: Function = null;
+  onBlur: Function = null;
 
   /**
    * true if the component listens and re-emits child-inputs events
@@ -32,7 +39,7 @@ export abstract class BaseInput<
   /**
    * contains ValidatedForm if exist
    */
-  protected form: ValidatedForm = null;
+  form: ValidatedForm = null;
 
   /**
    * contains parent-input if exist
@@ -68,6 +75,14 @@ export abstract class BaseInput<
     if (needToSendEventToForm) this.form.emitInput(eventData, event);
   }
 
+  emitBlur(event?: any) {
+    this.$emit('blur', event);
+
+    if (this.onBlur) this.onBlur();
+
+    this.form.emitBlur(event);
+  }
+
   getValidations() {
     return { required: this.options.required };
   }
@@ -77,10 +92,10 @@ export abstract class BaseInput<
    */
   get validate() {
     const validations = this.getValidations();
-    Object.keys(validations).forEach(key => {
+    Object.keys(validations).forEach((key: keyof typeof validations) => {
       // VeeValidate recognizes undefined values as valid constraints
       // so just remove it
-      if (validations[key] === void 0) delete validations[key];
+      if (validations[key] == null) delete validations[key];
     });
 
     return validations;

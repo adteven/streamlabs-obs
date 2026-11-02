@@ -1,12 +1,20 @@
+/*global SLOBS_BUNDLE_ID*/
+
 import { Inject } from './core/injector';
 import { UserService } from './user';
 import { HostsService } from './hosts';
 import fs from 'fs';
 import path from 'path';
-import electron from 'electron';
 import { authorizedHeaders, handleResponse } from 'util/requests';
 import throttle from 'lodash/throttle';
 import { Service } from './core/service';
+import Utils from './utils';
+import os from 'os';
+import * as remote from '@electron/remote';
+import { DiagnosticsService } from 'app-services';
+import { getOS, OS } from 'util/operating-systems';
+import { getWmiClass } from 'util/wmi';
+import { Subject } from 'rxjs';
 
 export type TUsageEvent = 'stream_start' | 'stream_end' | 'app_start' | 'app_close' | 'crash';
 
@@ -18,17 +26,96 @@ interface IUsageApiData {
   data: string;
 }
 
-type TAnalyticsEvent = 'TCP_API_REQUEST' | 'FacebookLogin'; // add more types if you need
+export type TAnalyticsEvent =
+  | 'PlatformLogin'
+  | 'SocialShare'
+  | 'Heartbeat'
+  | 'StreamPerformance'
+  | 'StreamingStatus'
+  | 'RecordingStatus'
+  | 'ReplayBufferStatus'
+  | 'Click'
+  | 'Session'
+  | 'Shown'
+  | 'AppStart'
+  | 'Highlighter'
+  | 'VisionFeature'
+  | 'AIHighlighter'
+  | 'Hardware'
+  | 'WebcamUse'
+  | 'MicrophoneUse'
+  | 'GuestCam'
+  | 'RecordingHistory'
+  | 'DualOutput'
+  | 'StreamToTikTokSettings'
+  | 'StreamCustomDestinations'
+  | 'TikTokLiveAccess'
+  | 'TwitchCredentialsAlert'
+  | 'TikTokApplyPrompt'
+  | 'ScheduleStream'
+  | 'StreamShift'
+  | 'DualOutputRecording' // @@ TODO add analytics for DualOutputRecording
+  | 'VerticalRecording' // @@ TODO add analytics for VerticalRecording
+  | 'Ultra'
+  | 'Onboarding'
+  | 'WidgetAdded'
+  | 'WidgetRemoved'
+  | 'GamePulse'
+  | 'Automations'
+  | 'SupportChat'
+  | 'LiveOutputEditing';
+
+// Refls are used as uuids for ultra components and should be updated for new ulta components.
+export type TUltraRefl =
+  | 'grow-community'
+  | 'slobs-dual-output'
+  | 'slobs-single-output'
+  | 'slobs-streamswitcher'
+  | 'slobs-side-nav'
+  | 'desktop-collab-cam'
+  | 'slobs-scene-collections'
+  | 'slobs-media-gallery'
+  | 'slobs-multistream-error'
+  | 'slobs-ui-themes'
+  | 'mobile-settings'
+  | 'slobs-multistream-settings'
+  | 'slobs-multistream'
+  | 'slobs-stream-settings'
+  | 'slobs-live-output-editing'
+  | 'slobs-automations'
+  | 'slobs-support-chat'
+  | 'slobs-nav-menu'
+  | string;
 
 interface IAnalyticsEvent {
   product: string;
-  version: number;
+  version: string;
   event: string;
   value?: any;
-  time?: string;
+  time?: Date;
   count?: number;
   uuid?: string;
   saveUser?: boolean;
+  userId?: number;
+  testGroup: 'A' | 'B';
+}
+
+interface ISystemInfo {
+  os: {
+    platform: string;
+    release: string;
+  };
+  arch: string;
+  cpu: string;
+  cores: number;
+  mem: number;
+}
+
+interface ISessionInfo {
+  startTime: Date;
+  endTime?: Date;
+  features: Dictionary<boolean>;
+  sysInfo: ISystemInfo;
 }
 
 export function track(event: TUsageEvent) {
@@ -46,22 +133,39 @@ export function track(event: TUsageEvent) {
 export class UsageStatisticsService extends Service {
   @Inject() userService: UserService;
   @Inject() hostsService: HostsService;
+  @Inject() diagnosticsService: DiagnosticsService;
 
   installerId: string;
-  version = electron.remote.process.env.SLOBS_VERSION;
+  version = Utils.env.SLOBS_VERSION;
 
-  private anaiticsEvents: IAnalyticsEvent[] = [];
+  private analyticsEvents: IAnalyticsEvent[] = [];
+  private refl: string = '';
+  private event: TAnalyticsEvent | null = null;
+
+  ultraSubscription = new Subject<boolean>();
 
   init() {
     this.loadInstallerId();
-    this.sendAnalytics = throttle(this.sendAnalytics, 2 * 60 * 1000);
+    this.throttledSendAnalytics = throttle(this.sendAnalytics, 30 * 1000);
+
+    setInterval(() => {
+      this.recordAnalyticsEvent('Heartbeat', { bundle: SLOBS_BUNDLE_ID });
+    }, 10 * 60 * 1000);
+
+    this.ultraSubscription.subscribe(() => {
+      if (this.refl === '') {
+        console.warn('Ultra event recorded with empty refl.');
+      }
+
+      this.recordAnalyticsEvent(this.event, { refl: this.refl });
+    });
   }
 
   loadInstallerId() {
     let installerId = localStorage.getItem('installerId');
 
     if (!installerId) {
-      const exePath = electron.remote.app.getPath('exe');
+      const exePath = remote.app.getPath('exe');
       const installerNamePath = path.join(path.dirname(exePath), 'installername');
 
       if (fs.existsSync(installerNamePath)) {
@@ -75,7 +179,7 @@ export class UsageStatisticsService extends Service {
               localStorage.setItem('installerId', installerId);
             }
           }
-        } catch (e) {
+        } catch (e: unknown) {
           console.error('Error loading installer id', e);
         }
       }
@@ -99,6 +203,17 @@ export class UsageStatisticsService extends Service {
     let headers = new Headers();
     headers.append('Content-Type', 'application/json');
 
+    // Don't check logged in because login may not be verified at this point
+    if (this.userService.state.auth && this.userService.state.auth.primaryPlatform) {
+      // TODO: index
+      // @ts-ignore
+      metadata['platform'] = this.userService.state.auth.primaryPlatform;
+    }
+
+    // TODO: index
+    // @ts-ignore
+    metadata['os'] = process.platform;
+
     const bodyData: IUsageApiData = {
       event,
       slobs_user_id: this.userService.getLocalUserId(),
@@ -106,7 +221,7 @@ export class UsageStatisticsService extends Service {
       data: JSON.stringify(metadata),
     };
 
-    if (this.userService.isLoggedIn()) {
+    if (this.userService.state.auth && this.userService.state.auth.apiToken) {
       headers = authorizedHeaders(this.userService.apiToken, headers);
     }
 
@@ -129,29 +244,136 @@ export class UsageStatisticsService extends Service {
   recordAnalyticsEvent(event: TAnalyticsEvent, value: any) {
     if (!this.isProduction) return;
 
-    this.anaiticsEvents.push({
+    const analyticsEvent: IAnalyticsEvent = {
       event,
       value,
       product: 'SLOBS',
       version: this.version,
       count: 1,
       uuid: this.userService.getLocalUserId(),
-    });
-    this.sendAnalytics();
+      time: new Date(),
+      testGroup: this.userService.isAlphaGroup ? 'A' : 'B',
+    };
+
+    if (this.userService.state.userId) analyticsEvent.userId = this.userService.state.userId;
+
+    this.analyticsEvents.push(analyticsEvent);
+    this.throttledSendAnalytics();
   }
 
-  private sendAnalytics() {
-    const data = { analyticsTokens: [...this.anaiticsEvents] };
+  /**
+   * All clicks should use this function to ensure consistent naming
+   * of click events.
+   * @param component A logical grouping to namespace this click. Can
+   * be the name of the component, or some other grouping.
+   * @param target A unique and descriptive name for the element that
+   * was clicked.
+   */
+  recordClick(component: string, target: string) {
+    this.recordAnalyticsEvent('Click', { component, target });
+  }
+
+  recordShown(component: string, target?: string) {
+    this.recordAnalyticsEvent('Shown', { component, target });
+  }
+
+  recordUltra(target: TUltraRefl, event?: TAnalyticsEvent) {
+    const eventName = event || 'Ultra';
+    this.recordClick(eventName, target);
+    this.refl = target;
+    this.event = eventName;
+  }
+
+  /**
+   * Should be called on shutdown to flush all events in the pipeline
+   */
+  async flushEvents(signal?: AbortSignal) {
+    // Correctly handle unsubscribing to prevent memory leaks
+    this.ultraSubscription.unsubscribe();
+
+    this.session.endTime = new Date();
+
+    const session = {
+      ...this.session,
+      // Convert features to an array for persistence for better querying
+      features: Object.keys(this.session.features),
+      isPrime: this.userService.state.isPrime,
+    };
+
+    this.recordAnalyticsEvent('Session', session);
+
+    // Unthrottled version
+    await this.sendAnalytics(signal);
+  }
+
+  // We can't fetch this before app startup like the rest of sysInfo since it
+  // relies on another service
+  getGpuInfo() {
+    const gpuSection: Dictionary<any> = {};
+    if (getOS() === OS.Windows) {
+      const gpuInfo = getWmiClass('Win32_VideoController', ['Name', 'DriverVersion', 'DriverDate']);
+
+      // Ensures we are working with an array
+      [].concat(gpuInfo).forEach((gpu, index) => {
+        gpuSection[`GPU ${index + 1}`] = {
+          Name: gpu.Name,
+          'Driver Version': gpu.DriverVersion,
+          'Driver Date': gpu.DriverDate,
+        };
+      });
+    }
+
+    return gpuSection;
+  }
+
+  getSysInfo() {
+    return {
+      os: {
+        platform: os.platform(),
+        release: os.release(),
+      },
+      arch: process.arch,
+      cpu: os.cpus()[0].model,
+      cores: os.cpus().length,
+      mem: os.totalmem(),
+      gpu: this.getGpuInfo(),
+    };
+  }
+
+  private session: ISessionInfo = {
+    startTime: new Date(),
+    features: {},
+    sysInfo: this.getSysInfo(),
+  };
+
+  recordFeatureUsage(feature: string) {
+    this.session.features[feature] = true;
+  }
+
+  /**
+   * Should not be called directly except during shutdown.
+   */
+  private async sendAnalytics(signal?: AbortSignal) {
+    if (!this.analyticsEvents.length) return;
+
+    const data = { analyticsTokens: [...this.analyticsEvents] };
     const headers = authorizedHeaders(this.userService.apiToken);
     headers.append('Content-Type', 'application/json');
 
-    this.anaiticsEvents.length = 0;
+    this.analyticsEvents.length = 0;
 
     const request = new Request(`https://${this.hostsService.analitycs}/slobs/data/ping`, {
       headers,
       method: 'post',
       body: JSON.stringify(data || {}),
     });
-    fetch(request).then(handleResponse);
+    await fetch(request, { signal })
+      .then(handleResponse)
+      .catch((e: unknown) => {
+        console.error('Error sending analytics events', e);
+        if (signal) throw e;
+      });
   }
+
+  private throttledSendAnalytics: () => void;
 }

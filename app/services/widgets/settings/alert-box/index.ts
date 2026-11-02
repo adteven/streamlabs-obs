@@ -1,5 +1,10 @@
 import uuid from 'uuid/v4';
-import { IWidgetData, WidgetSettingsService, WidgetType } from 'services/widgets';
+import {
+  IWidgetData,
+  WidgetDefinitions,
+  WidgetSettingsService,
+  WidgetType,
+} from 'services/widgets';
 import { WIDGET_INITIAL_STATE } from '../widget-settings';
 import { InheritMutations } from 'services/core/stateful-service';
 import {
@@ -18,7 +23,6 @@ import {
 import { IWidgetSettings } from '../../widgets-api';
 import { $t } from 'services/i18n';
 import { metadata } from 'components/widgets/inputs';
-import { settings } from 'cluster';
 
 export interface IAlertBoxData extends IWidgetData {
   settings: IAlertBoxSettings;
@@ -26,33 +30,54 @@ export interface IAlertBoxData extends IWidgetData {
   tts_languages?: any[];
 }
 
+/**
+ * @deprecated
+ */
 @InheritMutations()
 export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
   static initialState = WIDGET_INITIAL_STATE;
 
   apiNames() {
+    // TODO: index
+    // @ts-ignore
     return Object.keys(API_NAME_MAP).map(key => API_NAME_MAP[key]);
   }
 
   getApiSettings() {
+    const host = this.getHost();
     return {
       type: WidgetType.AlertBox,
-      url: `https://${this.getHost()}/alert-box/v3/${this.getWidgetToken()}`,
-      previewUrl: `https://${this.getHost()}/alert-box/v3/${this.getWidgetToken()}`,
-      dataFetchUrl: `https://${this.getHost()}/api/v5/slobs/widget/alertbox?include_linked_integrations_only=true`,
-      settingsSaveUrl: `https://${this.getHost()}/api/v5/slobs/widget/alertbox`,
+      url: WidgetDefinitions[WidgetType.AlertBox].url(host, this.getWidgetToken()),
+      previewUrl: `https://${host}/alert-box/v3/${this.getWidgetToken()}`,
+      webSettingsUrl: `https://${host}/dashboard#/alertbox`,
+      dataFetchUrl: `https://${host}/api/v5/slobs/widget/alertbox?include_linked_integrations_only=true&primary_only=false`,
+      settingsSaveUrl: `https://${host}/api/v5/slobs/widget/alertbox`,
       settingsUpdateEvent: 'filteredAlertBoxSettingsUpdate',
       customCodeAllowed: true,
       customFieldsAllowed: true,
-      testers: ['Follow', 'Subscription', 'Donation', 'Bits', 'Host'],
+      testers: [
+        'Follow',
+        'Subscription',
+        'Donation',
+        'Bits',
+        'Power-Ups',
+        'Share',
+        'Support',
+        'Stars',
+        'Like',
+      ],
     };
   }
 
   conditionsByType(type: string) {
+    // TODO: index
+    // @ts-ignore
     return conditions().base.concat(conditions()[type]);
   }
 
   conditionDataByCondition(type: string) {
+    // TODO: index
+    // @ts-ignore
     return conditionData()[type] || metadata.number({ title: $t('Variation Amount') });
   }
 
@@ -63,6 +88,8 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
   toggleCustomCode(enabled: boolean, data: IWidgetSettings, variation: IAlertBoxVariation) {
     const newSettings = { ...data };
     Object.keys(newSettings).forEach(type => {
+      // TODO: index
+      // @ts-ignore
       const variations = newSettings[type] && newSettings[type].variations;
       const found =
         variations && variations.find((vari: IAlertBoxVariation) => variation.id === vari.id);
@@ -77,6 +104,16 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     return {
       moderationDelay: metadata.slider({ title: $t('Alert Moderation delay'), min: 0, max: 600 }),
       alertDelay: metadata.slider({ title: $t('Global Alert Delay'), min: 0, max: 30 }),
+      interruptMode: metadata.toggle({
+        title: $t('Alert Parries'),
+        tooltip: $t('New alerts will interrupt the on screen alert'),
+      }),
+      interruptDelay: metadata.slider({
+        title: $t('Parry Alert Delay'),
+        min: 0,
+        max: 20,
+        interval: 0.5,
+      }),
       textThickness: metadata.slider({
         title: $t('Font Weight'),
         min: 300,
@@ -96,10 +133,7 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
       ttsSecurity: metadata.spamSecurity({
         title: $t('Spam Security'),
         tooltip: $t(
-          'This setting helps control text to speech spam, such as "wwwwwwwwwww." ' +
-            'By default this is turned off, but most users will want to set this to Low or Medium. ' +
-            'The higher the security, the less spam, but also a higher chance of a legitimate message being flagged ' +
-            'as spam and not being read.',
+          'This setting helps control text to speech spam, such as "wwwwwwwwwww." By default this is turned off, but most users will want to set this to Low or Medium. The higher the security, the less spam, but also a higher chance of a legitimate message being flagged as spam and not being read.',
         ),
         data: [$t('Off'), $t('Low'), $t('Medium'), $t('High')],
         indexModifier: 1,
@@ -131,9 +165,6 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
       messageEmojis: metadata.toggle({ title: $t('Allow Twitch Emojis?') }),
       ttsEnabled: metadata.toggle({ title: $t('Enable TTS?') }),
       unlimitedAlertMod: metadata.toggle({ title: $t('Unlimited Alert Moderation Delay') }),
-      unlimitedMediaMod: metadata.toggle({
-        title: $t('Unlimited Media Sharing Alert Moderation Delay'),
-      }),
       skillImage: metadata.toggle({ title: $t('Use Skill Image') }),
       imageFile: metadata.mediaGallery({ title: $t('Image/Video File') }),
       soundFile: metadata.sound({ title: $t('Sound File') }),
@@ -148,9 +179,7 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     custom: { js: string; html: string; css: string };
   }): IAlertBoxData {
     const { settings, ...rest } = data;
-    const newSettings = settings.mixer_account
-      ? this.transformSettings({ ...settings, ...settings.mixer_account })
-      : this.transformSettings(settings);
+    const newSettings = this.transformSettings(settings);
     return { ...rest, settings: newSettings, custom_defaults: rest.custom };
   }
 
@@ -162,16 +191,27 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     const triagedSettings = this.triageSettings(settings);
     Object.keys(triagedSettings).forEach(key => {
       if (key === 'subs') {
-        triagedSettings['subs'] = this.varifySetting({
-          showResubMessage: triagedSettings['resubs'].show_message,
-          ...triagedSettings['subs'],
-          ...triagedSettings['resubs'],
-        });
+        triagedSettings['subs'] = this.varifySetting(
+          {
+            // TODO: index
+            // @ts-ignore
+            showResubMessage: triagedSettings['resubs'].show_message,
+            ...triagedSettings['subs'],
+            // TODO: index
+            // @ts-ignore
+            ...triagedSettings['resubs'],
+          },
+          key,
+        );
       } else if (this.apiNames().includes(key) && key !== 'resubs') {
-        triagedSettings[key] = this.varifySetting(triagedSettings[key]);
+        // TODO: index
+        // @ts-ignore
+        triagedSettings[key] = this.varifySetting(triagedSettings[key], key);
       }
     });
     // resubs are folded into the sub settings
+    // TODO: index
+    // @ts-ignore
     triagedSettings['resubs'] = undefined;
 
     return triagedSettings;
@@ -188,21 +228,38 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
             : key.replace(test.tester, '');
         if (test.tester.test(key)) {
           testSuccess = true;
+          // TODO: index
+          // @ts-ignore
           if (!newSettings[test.name]) {
+            // TODO: index
+            // @ts-ignore
+            // TODO: index
+            // @ts-ignore
             newSettings[test.name] = { [newKey]: settings[key] };
           } else {
+            // TODO: index
+            // @ts-ignore
             newSettings[test.name][newKey] = settings[key];
           }
         }
       });
       if (['alert_delay', 'moderation_delay'].includes(key)) {
+        // TODO: index
+        // @ts-ignore
         newSettings[key] = Math.floor(settings[key] / 1000);
+      } else if (key === 'interrupt_mode_delay') {
+        const constrainedInterruptDelay =
+          settings.interrupt_mode_delay / 1000 <= 20 ? settings.interrupt_mode_delay / 1000 : 20;
+        newSettings[key] = constrainedInterruptDelay;
       } else if (!testSuccess && !/smfredemption/.test(key)) {
+        // TODO: index
+        // @ts-ignore
         newSettings[key] = settings[key];
       }
 
       // These settings are handled differently and purposely dropped on the floor in reshapeVariation
       newSettings.bits_alert_min_amount = settings.bits_alert_min_amount;
+      newSettings.power_up_alert_min_amount = settings.power_up_alert_min_amount;
       newSettings.donation_alert_min_amount = settings.donation_alert_min_amount;
       newSettings.fanfunding_alert_min_amount = settings.fanfunding_alert_min_amount;
       newSettings.host_viewer_minimum = settings.host_viewer_minimum;
@@ -212,10 +269,13 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     return newSettings;
   }
 
-  private varifySetting(setting: any): IAlertBoxSetting {
+  private varifySetting(setting: any, type: string): IAlertBoxSetting {
     const { show_message, enabled, showResubMessage, ...rest } = setting;
     const variations = setting.variations || [];
-    const defaultVariation = this.reshapeVariation(rest);
+    variations.forEach((variation: IAlertBoxVariation) => {
+      variation.settings.duration = variation.settings.duration / 1000;
+    });
+    const defaultVariation = this.reshapeVariation(rest, type);
     const idVariations = variations.map((variation: IAlertBoxVariation) => ({
       id: uuid(),
       ...variation,
@@ -224,7 +284,7 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     return { enabled, showResubMessage, showMessage: show_message, variations: idVariations };
   }
 
-  private reshapeVariation(setting: any): IAlertBoxVariation {
+  private reshapeVariation(setting: any, type: string): IAlertBoxVariation {
     const imgHref =
       setting.image_href === '/images/gallery/default.gif'
         ? 'http://uploads.twitchalerts.com/image-defaults/1n9bK4w.gif'
@@ -238,7 +298,7 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
       conditionData: null,
       conditions: [],
       name: 'Default',
-      id: 'default',
+      id: `default-${type}`,
       settings: {
         customCss: setting.custom_css,
         customHtml: setting.custom_html,
@@ -388,17 +448,40 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
     };
   }
 
+  private multiplyVariationDuration(variations: IAlertBoxVariation[]) {
+    variations.forEach(variation => {
+      variation.settings.duration = variation.settings.duration * 1000;
+    });
+    return variations;
+  }
+
   private flattenSettings(settings: IAlertBoxSettings): IAlertBoxApiSettings {
     const settingsObj = {} as IAlertBoxApiSettings;
     Object.keys(settings).forEach(setting => {
+      // TODO: index
+      // @ts-ignore
       const prefix = Object.keys(API_NAME_MAP).find(key => API_NAME_MAP[key] === setting);
       if (prefix && prefix !== 'resub') {
         const bitsPrefix = prefix === 'bit' ? 'bits' : prefix;
+        // TODO: index
+        // @ts-ignore
         const defaultVariation = settings[setting].variations.shift();
-        settingsObj[`${prefix}_variations`] = settings[setting].variations;
+        // TODO: index
+        // @ts-ignore
+        settingsObj[`${prefix}_variations`] = this.multiplyVariationDuration(
+          // TODO: index
+          // @ts-ignore
+          settings[setting].variations,
+        );
+        // TODO: index
+        // @ts-ignore
         settingsObj[`${bitsPrefix}_enabled`] = settings[setting].enabled;
+        // TODO: index
+        // @ts-ignore
         settingsObj[`show_${bitsPrefix}_message`] = settings[setting].showMessage;
         if (bitsPrefix === 'facebook_stars') {
+          // TODO: index
+          // @ts-ignore
           settingsObj.facebook_show_stars_message = settings[setting].showMessage;
         }
         const flattenedDefault =
@@ -406,9 +489,13 @@ export class AlertBoxService extends WidgetSettingsService<IAlertBoxData> {
             ? this.unshapeSubs(defaultVariation)
             : this.unshapeVariation(defaultVariation, bitsPrefix);
         Object.keys(flattenedDefault).forEach(key => {
+          // TODO: index
+          // @ts-ignore
           settingsObj[key] = flattenedDefault[key];
         });
       } else if (prefix !== 'resub') {
+        // TODO: index
+        // @ts-ignore
         settingsObj[setting] = settings[setting];
       }
     });

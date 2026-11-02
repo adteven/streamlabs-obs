@@ -2,7 +2,6 @@ import { Module, EApiPermissions, apiMethod, apiEvent } from './module';
 import { StreamingService, EStreamingState, ERecordingState } from 'services/streaming';
 import { Inject } from 'services/core/injector';
 import { Subject } from 'rxjs';
-import { StreamInfoService } from 'services/stream-info';
 
 interface IOutputState {
   streamingStatus: EStreamingState;
@@ -21,8 +20,7 @@ export class StreamingRecordingModule extends Module {
   moduleName = 'StreamingRecording';
   permissions = [EApiPermissions.Streaming];
 
-  @Inject() streamingService: StreamingService;
-  @Inject() streamInfoService: StreamInfoService;
+  @Inject() private streamingService: StreamingService;
 
   constructor() {
     super();
@@ -32,7 +30,7 @@ export class StreamingRecordingModule extends Module {
     this.streamingService.recordingStatusChange.subscribe(() => {
       this.outputStateChanged.next(this.streamingService.state);
     });
-    this.streamInfoService.streamInfoChanged.subscribe(() => {
+    this.streamingService.streamInfoChanged.subscribe(() => {
       this.streamInfoChanged.next(this.serializeStreamInfo());
     });
   }
@@ -53,15 +51,23 @@ export class StreamingRecordingModule extends Module {
     return this.serializeStreamInfo();
   }
 
-  private serializeStreamInfo() {
+  @apiMethod()
+  startStreaming() {
+    this.streamingService.goLive();
+  }
+
+  @apiMethod()
+  stopStreaming() {
+    this.streamingService.toggleStreaming();
+  }
+
+  private serializeStreamInfo(): IStreamInfo {
+    const info = this.streamingService.views;
+    const commonFields = info.commonFields;
     return {
-      title: this.streamInfoService.state.channelInfo
-        ? this.streamInfoService.state.channelInfo.title
-        : null,
-      game: this.streamInfoService.state.channelInfo
-        ? this.streamInfoService.state.channelInfo.game
-        : null,
-      viewerCount: this.streamInfoService.state.viewerCount,
+      title: commonFields.title,
+      game: info.game,
+      viewerCount: info.viewerCount,
     };
   }
 }

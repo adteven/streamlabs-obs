@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Yasaklı Medya",
+  "Price Per Second": "Saniye Başına Fiyat",
+  "Min. Amount to Share": "Paylaşılacak Min. Miktar",
+  "Max Duration": "Maks. Süre",
+  "Buffer Time": "Arabelleğe Alma Süresi",
+  "Spam Security": "Spam Güvenliği",
+  "The time between videos the next video has to buffer.": "Bir sonraki videonun arabelleğe alınması için videolar arasındaki süre.",
+  "Manage Media Settings": "Medya Ayarlarını Düzenle",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "Bağışçının medya paylaşmak için bağış yapması gereken minimum tutar. Varsayılan değer $5.00 USD"
+}

@@ -1,39 +1,121 @@
+import path from 'path';
 import { Service } from 'services/core/service';
 import { Inject } from 'services/core/injector';
 import { UserService } from 'services/user';
-import { getPlatformService } from 'services/platforms';
-import { CustomizationService, ICustomizationSettings } from 'services/customization';
-import electron from 'electron';
-import { YoutubeService } from 'services/platforms/youtube';
+import { CustomizationService, ICustomizationServiceState } from 'services/customization';
+import electron, { ipcRenderer } from 'electron';
 import url from 'url';
 import { WindowsService } from 'services/windows';
 import { $t } from 'services/i18n';
+import { WidgetsService, WidgetType } from 'services/widgets';
+import { InitAfter } from './core';
+import Utils from './utils';
+import { StreamingService } from './streaming';
+import { GuestApiHandler } from 'util/guest-api-handler';
+import { ChatHighlightService, IChatHighlightMessage } from './widgets/settings/chat-highlight';
+import { assertIsDefined } from 'util/properties-type-guards';
+import * as remote from '@electron/remote';
+import { SourcesService } from 'app-services';
 
+/**
+ * Generates a script that can be injected to enable the twitch's Better TTV emotes.
+ * @param isDarkTheme if streamlabs is in dark mode
+ * @return a javascript script
+ */
+
+export function enableBTTVEmotesScript(isDarkTheme: boolean) {
+  /*eslint-disable */
+  return `
+localStorage.setItem('bttv_clickTwitchEmotes', true);
+localStorage.setItem('bttv_darkenedMode', ${isDarkTheme ? 'true' : 'false'});
+
+var bttvscript = document.createElement('script');
+bttvscript.setAttribute('src','https://cdn.betterttv.net/betterttv.js');
+document.head.appendChild(bttvscript);
+
+function loadLazyEmotes() {
+  var els = document.getElementsByClassName('lazy-emote');
+
+  Array.prototype.forEach.call(els, el => {
+    const src = el.getAttribute('data-src');
+    if (el.src !== 'https:' + src) el.src = src;
+  });
+
+  setTimeout(loadLazyEmotes, 1000);
+}
+
+loadLazyEmotes();
+0;
+`;
+  /*eslint-enable */
+}
+
+@InitAfter('StreamingService')
 export class ChatService extends Service {
   @Inject() userService: UserService;
   @Inject() customizationService: CustomizationService;
   @Inject() windowsService: WindowsService;
+  @Inject() streamingService: StreamingService;
+  @Inject() chatHighlightService: ChatHighlightService;
+  @Inject() widgetsService: WidgetsService;
+  @Inject() sourcesService: SourcesService;
 
-  private chatView: Electron.BrowserView;
+  private chatView: Electron.BrowserView | null;
+  private chatUrl = '';
+  private electronWindowId: number | null;
+  private exposedHighlightApi = false;
 
   init() {
-    this.userService.userLogin.subscribe(() => this.initChat());
-    this.userService.userLogout.subscribe(() => this.deinitChat());
+    this.chatUrl = this.streamingService.views.chatUrl;
 
-    if (this.userService.isLoggedIn()) this.initChat();
+    // listen `streamInfoChanged` to init or deinit the chat
+    this.streamingService.streamInfoChanged.subscribe(streamInfo => {
+      if (streamInfo.chatUrl === this.chatUrl) return; // chatUrl has not been changed
+
+      // chat url has been changed, set the new chat url
+      const oldChatUrl = this.chatUrl;
+      this.chatUrl = streamInfo.chatUrl;
+
+      // chat url has been changed to an empty string, unmount chat
+      if (oldChatUrl && !this.chatUrl) {
+        this.unmountChat();
+        return;
+      }
+
+      // chat url changed to a new valid url, reload chat
+      this.loadUrl();
+    });
+
+    this.userService.userLogout.subscribe(() => {
+      this.deinitChat();
+    });
+
+    this.sourcesService.sourceAdded.subscribe(async source => {
+      if (
+        source.propertiesManagerType === 'widget' &&
+        source.propertiesManagerSettings?.widgetType === WidgetType.ChatHighlight
+      ) {
+        this.exposeHighlightApi();
+        this.refreshChat();
+      }
+    });
   }
 
-  refreshChat() {
-    this.navigateToChat();
+  async refreshChat() {
+    await this.loadUrl();
   }
 
-  mountChat(electronWindowId: number) {
-    if (!this.chatView) return;
+  hasChatHighlightWidget(): boolean {
+    return !!this.widgetsService.views.widgetSources.find(
+      source => source.type === WidgetType.ChatHighlight,
+    );
+  }
 
-    const win = electron.remote.BrowserWindow.fromId(electronWindowId);
-
-    // This method was added in our fork
-    (win as any).addBrowserView(this.chatView);
+  async mountChat(electronWindowId: number) {
+    if (!this.chatView) this.initChat();
+    this.electronWindowId = electronWindowId;
+    const win = remote.BrowserWindow.fromId(electronWindowId);
+    if (this.chatView && win) win.addBrowserView(this.chatView);
   }
 
   setChatBounds(position: IVec2, size: IVec2) {
@@ -47,61 +129,97 @@ export class ChatService extends Service {
     });
   }
 
-  unmountChat(electronWindowId: number) {
-    if (!this.chatView) return;
-
-    const win = electron.remote.BrowserWindow.fromId(electronWindowId);
-
-    // @ts-ignore: this method was added in our fork
-    win.removeBrowserView(this.chatView);
+  unmountChat() {
+    if (!this.electronWindowId) return; // already unmounted
+    const win = remote.BrowserWindow.fromId(this.electronWindowId);
+    if (this.chatView && win) win.removeBrowserView(this.chatView);
+    this.electronWindowId = null;
   }
 
   private initChat() {
     if (this.chatView) return;
+    if (!this.userService.isLoggedIn) return;
 
-    const partition = this.userService.state.auth.partition;
+    const partition = this.userService.state.auth?.partition;
 
-    this.chatView = new electron.remote.BrowserView({
+    this.chatView = new remote.BrowserView({
       webPreferences: {
         partition,
         nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.resolve(remote.app.getAppPath(), 'bundles', 'guest-api.js'),
+        sandbox: false,
       },
     });
 
-    this.navigateToChat();
+    // uncomment to show the dev-tools
+    // this.chatView.webContents.openDevTools({ mode: 'undocked' });
+
+    electron.ipcRenderer.sendSync('webContents-enableRemote', this.chatView.webContents.id);
+
     this.bindWindowListener();
     this.bindDomReadyListener();
 
     this.customizationService.settingsChanged.subscribe(changed => {
       this.handleSettingsChanged(changed);
     });
+
+    if (this.chatUrl) this.loadUrl();
   }
 
   private deinitChat() {
     // @ts-ignore: typings are incorrect
-    this.chatView.destroy();
+    this.unmountChat();
+    this.exposedHighlightApi = false;
     this.chatView = null;
   }
 
-  private async navigateToChat() {
-    const service = getPlatformService(this.userService.platform.type);
-    const nightMode = this.customizationService.isDarkTheme ? 'night' : 'day';
+  private async loadUrl() {
+    if (!this.chatUrl) return; // user has logged out
+    if (!this.chatView) return; // chat was already deinitialized
 
-    // Youtube requires some special redirecting
-    if (service instanceof YoutubeService) {
-      const chatUrl = await service.getChatUrl(nightMode);
-      this.chatView.webContents
-        .loadURL('https://youtube.com/signin')
-        .catch(this.handleRedirectError);
-
-      this.chatView.webContents.once('did-navigate', () => {
-        this.chatView.webContents.loadURL(chatUrl).catch(this.handleRedirectError);
-      });
-    } else {
-      const chatUrl = await service.getChatUrl(nightMode);
-
-      this.chatView.webContents.loadURL(chatUrl).catch(this.handleRedirectError);
+    // Prevent tokenless requests from being counted against the per-session
+    // attempt cap by clearing TikTok session data before loading the chat URL.
+    if (this.userService.platformType === 'tiktok') {
+      await this.clearTikTokSession();
     }
+
+    // try to load chat url
+    await this.chatView.webContents.loadURL(this.chatUrl).catch(this.handleRedirectError);
+
+    // Skip attempting to reload chat for TikTok: the second navigation re-runs webmssdk mid-redirect
+    // and counts agains the per-session attempt cap, causing the chat to be blocked.
+    if (this.userService.platformType === 'tiktok') return;
+
+    // Sometimes the chat url fails to load so try to load again if needed.
+    await Utils.sleep(1000);
+    if (this.chatView.webContents.getURL() !== this.chatUrl) {
+      await this.chatView.webContents.loadURL(this.chatUrl).catch(this.handleRedirectError);
+    }
+  }
+
+  private async clearTikTokSession() {
+    const partition = this.userService.state.auth?.partition;
+    if (!partition) return;
+    const ttSession = remote.session.fromPartition(partition);
+
+    // Preserve an existing TikTok login: if a session cookie is present the
+    // user is already authenticated, so skip the clear and keep them logged in
+    // across stream starts and app restarts.
+    const sessionCookies = await ttSession.cookies.get({
+      domain: '.tiktok.com',
+      name: 'sessionid',
+    });
+    if (sessionCookies.length > 0) return;
+
+    const storages: ('cookies' | 'localstorage' | 'indexdb' | 'serviceworkers')[] = [
+      'cookies',
+      'localstorage',
+      'indexdb',
+      'serviceworkers',
+    ];
+    await ttSession.clearStorageData({ origin: 'https://www.tiktok.com', storages });
+    await ttSession.clearStorageData({ origin: 'https://livecenter.tiktok.com', storages });
   }
 
   handleRedirectError(e: Error) {
@@ -112,10 +230,35 @@ export class ChatService extends Service {
   }
 
   private bindWindowListener() {
-    electron.ipcRenderer.send('webContents-preventPopup', this.chatView.webContents.id);
+    if (!this.chatView) return; // chat was already deinitialized
 
-    this.chatView.webContents.on('new-window', (evt, targetUrl) => {
-      const parsedUrl = url.parse(targetUrl);
+    if (this.userService.platformType === 'youtube') {
+      // Preventing navigation has to be done in the main process
+      ipcRenderer.send('webContents-bindYTChat', this.chatView.webContents.id);
+
+      this.chatView.webContents.on('will-navigate', (e, targetUrl) => {
+        const parsed = url.parse(targetUrl);
+
+        if (parsed.hostname === 'accounts.google.com') {
+          remote.dialog
+            .showMessageBox(Utils.getMainWindow(), {
+              title: $t('YouTube Chat'),
+              message: $t(
+                'This action cannot be performed inside Streamlabs Desktop. To interact with chat, you can open this chat in a web browser.',
+              ),
+              buttons: [$t('OK'), $t('Open In Web Browser')],
+            })
+            .then(({ response }) => {
+              if (response === 1) {
+                remote.shell.openExternal(this.chatUrl);
+              }
+            });
+        }
+      });
+    }
+
+    this.chatView.webContents.setWindowOpenHandler(details => {
+      const parsedUrl = url.parse(details.url);
       const protocol = parsedUrl.protocol;
 
       if (protocol === 'http:' || protocol === 'https:') {
@@ -138,63 +281,99 @@ export class ChatService extends Service {
             'ffz-settings',
           );
         } else {
-          electron.remote.shell.openExternal(targetUrl);
+          remote.shell.openExternal(details.url);
         }
       }
+
+      return { action: 'deny' };
     });
+  }
+
+  private exposeHighlightApi() {
+    if (!this.chatView) return;
+    if (!this.hasChatHighlightWidget() || this.exposedHighlightApi) return;
+
+    new GuestApiHandler().exposeApi(this.chatView.webContents.id, {
+      pinMessage: (messageData: IChatHighlightMessage) =>
+        this.chatHighlightService.pinMessage(messageData),
+      unpinMessage: () => this.chatHighlightService.unpinMessage(),
+      showUnpinButton: this.chatHighlightService.hasPinnedMessage,
+    });
+
+    this.exposedHighlightApi = true;
   }
 
   private bindDomReadyListener() {
-    const settings = this.customizationService.getSettings();
+    if (!this.chatView) return; // chat was already deinitialized
+
+    const settings = this.customizationService.state;
+    this.exposeHighlightApi();
 
     this.chatView.webContents.on('dom-ready', () => {
+      if (!this.chatView) return; // chat was already deinitialized
+
       this.chatView.webContents.setZoomFactor(settings.chatZoomFactor);
 
-      if (settings.enableBTTVEmotes && this.userService.platform.type === 'twitch') {
-        this.chatView.webContents.executeJavaScript(
-          `
-          localStorage.setItem('bttv_clickTwitchEmotes', true);
-          localStorage.setItem('bttv_darkenedMode', ${
-            this.customizationService.isDarkTheme ? 'true' : 'false'
-          });
-
-          var bttvscript = document.createElement('script');
-          bttvscript.setAttribute('src','https://cdn.betterttv.net/betterttv.js');
-          document.head.appendChild(bttvscript);
-
-          function loadLazyEmotes() {
-            var els = document.getElementsByClassName('lazy-emote');
-
-            Array.prototype.forEach.call(els, el => {
-              const src = el.getAttribute('data-src');
-              if (el.src !== 'https:' + src) el.src = src;
-            });
-
-            setTimeout(loadLazyEmotes, 1000);
-          }
-
-          loadLazyEmotes();
-        `,
-          true,
-        );
+      if (this.userService.platform?.type === 'twitch') {
+        // loads bttv emotes if their are enabled
+        if (settings.enableBTTVEmotes) {
+          this.chatView.webContents.executeJavaScript(
+            enableBTTVEmotesScript(this.customizationService.isDarkTheme),
+            true,
+          );
+        }
+        // loads ffz emotes if their are enabled
+        if (settings.enableFFZEmotes) {
+          this.chatView.webContents.executeJavaScript(
+            `
+            var ffzscript1 = document.createElement('script');
+            ffzscript1.setAttribute('src','https://cdn.frankerfacez.com/script/script.min.js');
+            document.head.appendChild(ffzscript1);
+            0;
+          `,
+            true,
+          );
+        }
+        if (this.hasChatHighlightWidget()) {
+          // Uncomment to debug chat-highlight-script.js
+          // this.chatView.webContents.openDevTools({ mode: 'detach' });
+          setTimeout(() => {
+            if (!this.chatView) return;
+            const chatHighlightScript = require('!!raw-loader!./widgets/settings/chat-highlight-script.js');
+            assertIsDefined(chatHighlightScript.default);
+            this.chatView.webContents.executeJavaScript(chatHighlightScript.default, true);
+          }, 10000);
+        }
       }
 
-      if (settings.enableFFZEmotes && this.userService.platform.type === 'twitch') {
-        this.chatView.webContents.executeJavaScript(
-          `
-          var ffzscript1 = document.createElement('script');
-          ffzscript1.setAttribute('src','https://cdn.frankerfacez.com/script/script.min.js');
-          document.head.appendChild(ffzscript1);
-        `,
-          true,
-        );
+      // facebook chat doesn't fit our layout by default
+      // inject a script that removes scrollbars and sets auto width for the chat
+      if (this.userService.platform?.type === 'facebook') {
+        Utils.sleep(2000).then(() => {
+          if (!this.chatView) return;
+          this.chatView.webContents
+            .executeJavaScript(
+              `
+                document.querySelector('html').style = 'overflow-y: hidden !important;';
+                const iframe = document.querySelector('iframe');
+                if (!iframe || !iframe.contentDocument) return;
+                var chatContainer = iframe.contentDocument.querySelector('body > div > div > div');
+                chatContainer.style.marginLeft = '0';
+                chatContainer.style.marginRight = '0';
+                chatContainer.style.maxWidth = 'none';
+                `,
+              true,
+            )
+            .catch(e => {
+              console.error(e);
+            });
+        });
       }
     });
   }
 
-  private handleSettingsChanged(changed: Partial<ICustomizationSettings>) {
+  private handleSettingsChanged(changed: DeepPartial<ICustomizationServiceState>) {
     if (!this.chatView) return;
-
     if (changed.chatZoomFactor) {
       this.chatView.webContents.setZoomFactor(changed.chatZoomFactor);
     }
@@ -202,5 +381,23 @@ export class ChatService extends Service {
     if (changed.enableBTTVEmotes != null || changed.enableFFZEmotes != null) {
       this.refreshChat();
     }
+  }
+
+  showMultistreamChatWindow() {
+    // We use a generated window Id to prevent somebody popping out the
+    // same winow multiple times.
+    this.windowsService.createOneOffWindow(
+      {
+        componentName: 'MultistreamChatInfo',
+        title: $t('Multichat Platform Support'),
+        size: {
+          width: 748,
+          height: 635,
+          minWidth: 748,
+          minHeight: 635,
+        },
+      },
+      'MultistreamChatInfo',
+    );
   }
 }

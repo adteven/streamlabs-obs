@@ -2,8 +2,10 @@ import { ArrayNode } from './array-node';
 import { SceneItemsNode } from './scene-items';
 import { ScenesService, Scene } from '../../scenes';
 import { SourcesService } from '../../sources';
+import { VideoSettingsService } from '../../settings-v2/video';
 import { HotkeysNode } from './hotkeys';
 import { SceneFiltersNode } from './scene-filters';
+import { ISceneCollectionLoadContext } from './load-session';
 
 export interface ISceneSchema {
   id: string;
@@ -14,14 +16,15 @@ export interface ISceneSchema {
   filters?: SceneFiltersNode;
 }
 
-export class ScenesNode extends ArrayNode<ISceneSchema, {}, Scene> {
+export class ScenesNode extends ArrayNode<ISceneSchema, ISceneCollectionLoadContext, Scene> {
   schemaVersion = 1;
 
   scenesService: ScenesService = ScenesService.instance;
   sourcesService: SourcesService = SourcesService.instance;
+  videoSettingsService: VideoSettingsService = VideoSettingsService.instance;
 
   getItems() {
-    return this.scenesService.scenes;
+    return this.scenesService.views.scenes;
   }
 
   saveItem(scene: Scene): Promise<ISceneSchema> {
@@ -45,7 +48,7 @@ export class ScenesNode extends ArrayNode<ISceneSchema, {}, Scene> {
             sceneItems,
             id: scene.id,
             name: scene.name,
-            active: this.scenesService.activeSceneId === scene.id,
+            active: this.scenesService.views.activeSceneId === scene.id,
           });
         });
     });
@@ -64,27 +67,35 @@ export class ScenesNode extends ArrayNode<ISceneSchema, {}, Scene> {
       ids[item.id] = true;
       return true;
     });
+
+    // Verify vertical video context exists here so it is only checked once per scene instead of per scene item
+    this.videoSettingsService.validateVideoContext('vertical');
   }
 
-  loadItem(obj: ISceneSchema): Promise<() => Promise<void>> {
-    return new Promise(resolve => {
-      const scene = this.scenesService.createScene(obj.name, { sceneId: obj.id });
+  async loadItem(
+    obj: ISceneSchema,
+    context: ISceneCollectionLoadContext,
+  ): Promise<() => Promise<void>> {
+    const scene = this.scenesService.createScene(obj.name, { sceneId: obj.id });
 
-      if (obj.filters) obj.filters.load({ sceneId: scene.id });
+    if (obj.filters) {
+      await obj.filters.load({ sceneId: scene.id, loadSession: context.loadSession });
+    }
 
-      resolve(() => {
-        return new Promise(resolve => {
-          obj.sceneItems.load({ scene }).then(() => {
-            if (obj.active) this.scenesService.makeSceneActive(scene.id);
+    return async () => {
+      await obj.sceneItems.load({ scene, loadSession: context.loadSession });
+      if (obj.active) this.scenesService.makeSceneActive(scene.id);
 
-            if (obj.hotkeys) {
-              obj.hotkeys.load({ sceneId: scene.id }).then(() => resolve());
-            } else {
-              resolve();
-            }
-          });
-        });
-      });
-    });
+      if (obj.hotkeys) {
+        await obj.hotkeys.load({ sceneId: scene.id, loadSession: context.loadSession });
+      }
+    };
+  }
+
+  async afterLoad() {
+    // Make sure we actually have an active scene (an invalid state things something get in)
+    if (!this.scenesService.views.activeSceneId) {
+      this.scenesService.makeSceneActive(this.scenesService.views.scenes[0].id);
+    }
   }
 }

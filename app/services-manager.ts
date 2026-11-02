@@ -1,4 +1,3 @@
-import 'reflect-metadata';
 import { Service } from 'services/core/service';
 import Utils from 'services/utils';
 import { ObserveList, StatefulService } from 'services/core';
@@ -13,8 +12,8 @@ import { InternalApiClient } from 'services/api/internal-api-client';
  * @see Inject() decorator
  * Also it initialize all services with `InitAfter()` decorator
  * @see InitAfter() decorator
- * This is only the service that executes its methods in all widows
- * instead of redirecting the calls to the main window
+ * This is the only service that executes its methods in all windows
+ * instead of redirecting the calls to the worker window
  */
 export class ServicesManager extends Service {
   /**
@@ -30,26 +29,27 @@ export class ServicesManager extends Service {
   private instances: Dictionary<Service> = {};
 
   /**
-   * The child windows or one-off windows don't execute services methods directly
-   * They use InternalApiClient to send IPC requests to the main window
+   * Non-worker (UI) windows don't execute service methods directly.
+   * They use InternalApiClient to send IPC requests (via the main process)
+   * to the worker window.
    */
   internalApiClient: InternalApiClient;
 
   init() {
     // this helps to debug services from the console
-    if (Utils.isDevMode()) {
-      window['sm'] = this;
+    if (Utils.isDevMode() || process.env.SLOBS_PRODUCTION_DEBUG) {
+      (window as typeof window & { sm: ServicesManager }).sm = this;
     }
 
-    // Setup a different behavior for services if we're not in the MainWindow now
-    if (!Utils.isMainWindow()) {
+    // Renderer windows access services in the worker window via proxy API
+    if (!Utils.isWorkerWindow()) {
       this.internalApiClient = new InternalApiClient();
-      // redirect all services methods calls to the main window's services
+      // redirect all service method calls to the worker window's services
       Service.setupProxy(service => this.internalApiClient.applyIpcProxy(service));
       // don't call the init method for all services
       Service.setupInitFunction(service => null);
     } else {
-      // if it's a main window, subscribe to serviceAfterInit event
+      // if it's the worker window, subscribe to serviceAfterInit event
       // to initialize services with `InitAfter()` decorator
       Service.serviceAfterInit.subscribe(service => this.initObservers(service));
     }
@@ -71,14 +71,17 @@ export class ServicesManager extends Service {
   }
 
   getStatefulServicesAndMutators(): Dictionary<typeof StatefulService> {
-    const statefulServices = {};
+    const statefulServices: Dictionary<typeof StatefulService> = {};
+
     Object.keys(this.services).forEach(serviceName => {
       const ServiceClass = this.services[serviceName];
+      if (typeof ServiceClass === 'object') return; // skip AppServices object
       const isStatefulService = ServiceClass['initialState'];
       const isMutator = ServiceClass.prototype.mutations;
       if (!isStatefulService && !isMutator) return;
       statefulServices[serviceName] = this.services[serviceName];
     });
+
     return statefulServices;
   }
 
@@ -100,7 +103,7 @@ export class ServicesManager extends Service {
     }
 
     const helperName = resourceId.split('[')[0];
-    const constructorArgsStr = resourceId.substr(helperName.length);
+    const constructorArgsStr = resourceId.slice(helperName.length);
     const constructorArgs = constructorArgsStr ? JSON.parse(constructorArgsStr) : void 0;
     return this.getHelper(helperName, constructorArgs);
   }
@@ -113,7 +116,7 @@ export class ServicesManager extends Service {
 
   private initService(serviceName: string): Service {
     const ServiceClass = this.services[serviceName];
-    if (!ServiceClass) throw `unknown service: ${serviceName}`;
+    if (!ServiceClass) throw new Error(`unknown service: ${serviceName}`);
     if (this.instances[serviceName]) return;
     this.instances[serviceName] = ServiceClass.instance;
     return ServiceClass.instance;

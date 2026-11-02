@@ -1,0 +1,98 @@
+@import '../../styles/index';
+
+.help-tip {
+  .radius();
+
+  position: absolute;
+  background: var(--teal);
+  color: var(--action-button-text);
+  width: 260px;
+  padding: 10px;
+  font-size: 14px;
+  z-index: @z-above-resize-bars;
+}
+
+.help-tip__arrow {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 8px 8px 8px 0;
+  border-color: transparent var(--teal) transparent transparent;
+  position: absolute;
+  left: -8px;
+
+  &.help-tip__arrow-right {
+    left: auto;
+    right: -8px;
+    transform: rotate(180deg);
+  }
+
+  &.help-tip__arrow-bottom {
+    bottom: 8px;
+  }
+
+  &.help-tip__arrow-middle {
+    top: 50%;
+    margin-top: -8px;
+  }
+}
+
+.help-tip__close {
+  position: absolute;
+  right: 10px;
+  cursor: pointer;
+  opacity: 0.6;
+
+  &:hover {
+    opacity: 1;
+  }
+}
+
+.help-tip__title {
+  .weight(@medium);
+
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+
+  i {
+    margin-right: 8px;
+    font-size: 16px;
+  }
+}
+
+// Single-row variant: title and body side by side, so the tip is short enough to sit in the nav.
+// Vertically centered on `top`; the right margin leaves room for the right-edge arrow.
+.help-tip--compact {
+  display: flex;
+  align-items: center;
+  width: 420px;
+  padding: 4px 10px;
+  margin-right: 12px;
+  transform: translateY(-50%);
+
+  .help-tip__title {
+    flex: none;
+    margin: 0 12px 0 0;
+    padding: 0 12px 0 0;
+    border-bottom: none;
+    border-right: 1px solid rgba(255, 255, 255, 0.2);
+    font-size: 14px;
+    white-space: nowrap;
+  }
+
+  .help-tip__body {
+    font-size: 13px;
+    line-height: 1.25;
+  }
+
+  .help-tip__close {
+    position: static;
+    order: 1;
+    flex: none;
+    margin-left: 10px;
+  }
+}

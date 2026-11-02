@@ -1,0 +1,11 @@
+{
+  "Banned Media": "被禁止的媒体",
+  "Price Per Second": "每秒价格",
+  "Min. Amount to Share": "最小分享量",
+  "Max Duration": "最长持续时间",
+  "Buffer Time": "缓冲时间",
+  "Spam Security": "垃圾信息安全性",
+  "The time between videos the next video has to buffer.": "下一视频必须的视频间缓冲时间。",
+  "Manage Media Settings": "管理媒体设置",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "打赏者分享媒体所必须的最低打赏金额。默认值为 5 美元"
+}

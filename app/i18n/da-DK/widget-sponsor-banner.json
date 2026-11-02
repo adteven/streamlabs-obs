@@ -1,0 +1,23 @@
+{
+  "Sponsor Banner": "Sponsorbanner",
+  "Placement": "Placering",
+  "Image Layout": "Billedlayout",
+  "Image Duration (seconds)": "Billedets varighed (sekunder)",
+  "Add Image": "Tilføj billede",
+  "Widget Hide Duration": "Varighed af widgetskjulning",
+  "Widget Show Duration": "Varighed af widgetvisning",
+  "Banner Width": "Bannerbredde",
+  "Banner Height": "Bannerhøjde",
+  "Image Animation": "Billedanimation",
+  "Background Color": "Baggrundsfarve",
+  "Transparent": "Gennemsigtig",
+  "Single": "Enkelt",
+  "Double": "Dobbelt",
+  "Set to zero to show the widget permanently.": "Indstil til nul for at vise widgetten permanent.",
+  "The amount of time the widget will appear.": "Mængden af tid widgetten vises.",
+  "These are the animations that are used to show your banner.": "Dette er animationerne, der bruges til at vise dit banner.",
+  "Visual Settings": "Visuelle indstillinger",
+  "Image Set %{number}": "Billedsæt %{number}",
+  "No Image": "Intet billede",
+  "Show off rotating media to display your socials, sponsorships, CTAs or just cute animations.": "Kør roterende medier for at vise dine sociale medier, sponsorater, CTAs (opfordringer til handling) eller bare søde animationer."
+}

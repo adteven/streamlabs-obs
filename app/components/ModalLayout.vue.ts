@@ -5,8 +5,10 @@ import { CustomizationService } from 'services/customization';
 import { Inject } from 'services/core/injector';
 import { AppService } from 'services/app';
 import TsxComponent from 'components/tsx-component';
+import { OS, getOS } from 'util/operating-systems';
+import Scrollable from 'components/shared/Scrollable';
 
-@Component({})
+@Component({ components: { Scrollable } })
 export default class ModalLayout extends TsxComponent<{
   showControls?: boolean;
   showCancel?: boolean;
@@ -18,6 +20,7 @@ export default class ModalLayout extends TsxComponent<{
   contentStyles?: Dictionary<string>;
   fixedSectionHeight?: number;
   customControls?: boolean;
+  hasTitleBar?: boolean;
 }> {
   contentStyle: Object = {};
   fixedStyle: Object = {};
@@ -69,10 +72,15 @@ export default class ModalLayout extends TsxComponent<{
   @Prop({ default: true })
   hasTitleBar: boolean;
 
+  unbind: () => void;
+
   created() {
+    this.unbind = this.customizationService.state.bindProps(this, {
+      theme: 'theme',
+    });
+
     const contentStyle = {
       padding: '16px',
-      overflowY: 'auto',
     };
 
     Object.assign(contentStyle, this.contentStyles);
@@ -85,12 +93,18 @@ export default class ModalLayout extends TsxComponent<{
     this.fixedStyle = fixedStyle;
   }
 
-  get wrapperClassNames() {
-    if (this.hasTitleBar) {
-      return [this.customizationService.currentTheme, 'has-titlebar'].join(' ');
-    }
+  destroyed() {
+    this.unbind();
+  }
 
-    return this.customizationService.currentTheme;
+  theme = 'night-theme';
+
+  get wrapperClassNames() {
+    return {
+      [this.theme]: true,
+      'has-titlebar': this.hasTitleBar,
+      'modal-layout-mac': getOS() === OS.Mac,
+    };
   }
 
   cancel() {

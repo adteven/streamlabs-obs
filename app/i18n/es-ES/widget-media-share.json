@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Medio vetado",
+  "Price Per Second": "Precio por segundo",
+  "Min. Amount to Share": "Cantidad mínima para compartir",
+  "Max Duration": "Duración máxima",
+  "Buffer Time": "Tiempo de búfer",
+  "Spam Security": "Seguridad de spam",
+  "The time between videos the next video has to buffer.": "El tiempo entre vídeos que el siguiente vídeo tiene que guardar en búfer.",
+  "Manage Media Settings": "Gestionar ajustes de medios",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "La cantidad mínima que un donante debe dar para compartir medios. El valor predeterminado es 5,00 dólares USD"
+}

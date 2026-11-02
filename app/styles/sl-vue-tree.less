@@ -1,3 +1,12 @@
+.vue-tree-container {
+  flex-grow: 1;
+  height: 100%;
+  border-color: var(--section);
+  background: var(--section);
+  .radius(1);
+  overflow: hidden;
+}
+
 .sl-vue-tree-toggle {
   .margin-right();
 
@@ -16,6 +25,7 @@
   background-color: var(--section) !important;
   border: 0 !important;
   color: var(--paragraph) !important;
+  overflow: hidden;
 }
 
 .sl-vue-tree-selected > .sl-vue-tree-node-item {
@@ -31,7 +41,6 @@
 
 .sl-vue-tree-node-item {
   .padding-h-sides(2) !important;
-  .transition();
 
   color: var(--paragraph) !important;
   border: 0 !important;
@@ -51,8 +60,8 @@
 
 .sl-vue-tree-cursor {
   border: 0 !important;
-  background-color: var(--input-border);
-  z-index: 10;
+  background-color: var(--button);
+  z-index: @z-overlay;
 }
 
 .sl-vue-tree-node-item.sl-vue-tree-cursor-inside {

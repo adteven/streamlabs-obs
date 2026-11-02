@@ -1,10 +1,21 @@
 import { Module, EApiPermissions, apiMethod, apiEvent, IApiContext } from './module';
-import { SourcesService, TSourceType, Source, TPropertiesManager } from 'services/sources';
+import {
+  SourcesService,
+  TSourceType,
+  Source,
+  TPropertiesManager,
+  EDeinterlaceMode,
+  EDeinterlaceFieldOrder,
+} from 'services/sources';
 import { Inject } from 'services/core/injector';
 import { Subject } from 'rxjs';
 import { PlatformAppsService } from 'services/platform-apps';
+import { stringifyAppSourceSettings } from 'services/platform-apps/source-url';
 import { ScenesService } from 'services/scenes';
 import { AudioService } from 'services/audio';
+import { SourceFiltersService } from 'app-services';
+import { TSourceFilterType } from 'services/source-filters';
+import { TObsValue } from 'components/obs/inputs/ObsInput';
 
 interface ISourceFlags {
   audio: boolean;
@@ -17,6 +28,8 @@ interface ISourceSize {
   height: number;
 }
 
+type TMonitoringType = 'none' | 'monitor-only' | 'monitor-and-output';
+
 interface ISource {
   id: string;
   name: string;
@@ -28,6 +41,9 @@ interface ISource {
   appSourceId?: string;
   muted?: boolean;
   volume?: number;
+  monitoringType?: TMonitoringType;
+  deinterlaceMode: EDeinterlaceMode;
+  deinterlaceFieldOrder: EDeinterlaceFieldOrder;
 }
 
 export class SourcesModule extends Module {
@@ -38,15 +54,16 @@ export class SourcesModule extends Module {
   @Inject() private platformAppsService: PlatformAppsService;
   @Inject() private scenesService: ScenesService;
   @Inject() private audioService: AudioService;
+  @Inject() private sourceFiltersService: SourceFiltersService;
 
   constructor() {
     super();
     this.sourcesService.sourceAdded.subscribe(sourceData => {
-      const source = this.sourcesService.getSourceById(sourceData.sourceId);
+      const source = this.sourcesService.views.getSource(sourceData.sourceId);
       this.sourceAdded.next(this.serializeSource(source));
     });
     this.sourcesService.sourceUpdated.subscribe(sourceData => {
-      const source = this.sourcesService.getSourceById(sourceData.sourceId);
+      const source = this.sourcesService.views.getSource(sourceData.sourceId);
       this.sourceUpdated.next(this.serializeSource(source));
     });
     this.sourcesService.sourceRemoved.subscribe(sourceData => {
@@ -70,12 +87,12 @@ export class SourcesModule extends Module {
 
   @apiMethod()
   getSources() {
-    return this.sourcesService.getSources().map(source => this.serializeSource(source));
+    return this.sourcesService.views.getSources().map(source => this.serializeSource(source));
   }
 
   @apiMethod()
   getSource(_ctx: IApiContext, id: string): ISource | null {
-    const source = this.sourcesService.getSource(id);
+    const source = this.sourcesService.views.getSource(id);
 
     return source ? this.serializeSource(source) : null;
   }
@@ -91,7 +108,7 @@ export class SourcesModule extends Module {
   getAppSourceSettings(ctx: IApiContext, sourceId: string) {
     const source = this.getAppSourceForApp(sourceId, ctx.app.id);
 
-    return source.getPropertiesManagerSettings().appSettings;
+    return stringifyAppSourceSettings(source.getPropertiesManagerSettings().appSettings);
   }
 
   @apiMethod()
@@ -99,12 +116,12 @@ export class SourcesModule extends Module {
     const source = this.getAppSourceForApp(sourceId, ctx.app.id);
 
     source.setPropertiesManagerSettings({
-      appSettings: settings,
+      appSettings: stringifyAppSourceSettings(settings),
     });
   }
 
   private getAppSourceForApp(sourceId: string, appId: string) {
-    const source = this.sourcesService.getSource(sourceId);
+    const source = this.sourcesService.views.getSource(sourceId);
 
     if (!source) {
       throw new Error(`The source with id ${sourceId} does not exist!`);
@@ -137,7 +154,7 @@ export class SourcesModule extends Module {
       propertiesManagerSettings: {
         appSourceId,
         appId: ctx.app.id,
-        appSettings: {},
+        appSettings: '',
       },
     });
 
@@ -149,25 +166,34 @@ export class SourcesModule extends Module {
     const requiredKeys = ['id'];
     this.validatePatch(requiredKeys, patch);
 
-    const source = this.sourcesService.getSource(patch.id);
+    const source = this.sourcesService.views.getSource(patch.id);
 
     if (patch.name) {
       source.setName(patch.name);
     }
 
     if (patch.muted != null) {
-      this.audioService.getSource(patch.id).setMuted(patch.muted);
+      this.audioService.views.getSource(patch.id).setMuted(patch.muted);
     }
 
     if (patch.volume != null) {
-      this.audioService.getSource(patch.id).setDeflection(patch.volume);
+      this.audioService.views.getSource(patch.id).setDeflection(patch.volume);
+    }
+
+    if (patch.monitoringType) {
+      const monitorTypes: TMonitoringType[] = ['none', 'monitor-only', 'monitor-and-output'];
+      const type = monitorTypes.findIndex(t => t === patch.monitoringType);
+
+      if (type != null) {
+        this.audioService.setSettings(patch.id, { monitoringType: type });
+      }
     }
   }
 
   @apiMethod()
   removeSource(ctx: IApiContext, sourceId: string) {
     // Make sure this source doesn't exist in any scenes
-    const item = this.scenesService.getSceneItems().find(sceneItem => {
+    const item = this.scenesService.views.getSceneItems().find(sceneItem => {
       return sceneItem.sourceId === sourceId;
     });
 
@@ -180,12 +206,12 @@ export class SourcesModule extends Module {
 
   @apiMethod()
   getObsSettings(ctx: IApiContext, sourceId: string) {
-    return this.sourcesService.getSource(sourceId).getSettings();
+    return this.sourcesService.views.getSource(sourceId).getSettings();
   }
 
   @apiMethod()
   setObsSettings(ctx: IApiContext, sourceId: string, settingsPatch: Dictionary<any>) {
-    return this.sourcesService.getSource(sourceId).updateSettings(settingsPatch);
+    return this.sourcesService.views.getSource(sourceId).updateSettings(settingsPatch);
   }
 
   private serializeSource(source: Source): ISource {
@@ -203,6 +229,8 @@ export class SourcesModule extends Module {
         width: source.width,
         height: source.height,
       },
+      deinterlaceMode: source.deinterlaceMode,
+      deinterlaceFieldOrder: source.deinterlaceFieldOrder,
     };
 
     if (source.getPropertiesManagerType() === 'platformApp') {
@@ -212,11 +240,56 @@ export class SourcesModule extends Module {
     }
 
     if (source.audio) {
-      const audioSource = this.audioService.getSource(source.sourceId);
+      const audioSource = this.audioService.views.getSource(source.sourceId);
       serialized.volume = audioSource.fader.deflection;
       serialized.muted = audioSource.muted;
+
+      const monitorTypes: TMonitoringType[] = ['none', 'monitor-only', 'monitor-and-output'];
+      serialized.monitoringType = monitorTypes[audioSource.monitoringType];
     }
 
     return serialized;
+  }
+
+  @apiMethod()
+  getFilterPresetOptions() {
+    return this.sourceFiltersService.views.presetFilterOptions;
+  }
+
+  @apiMethod()
+  setFilterPreset(ctx: IApiContext, sourceId: string, preset: string) {
+    this.sourceFiltersService.addPresetFilter(sourceId, preset);
+  }
+
+  @apiMethod()
+  getCurrentFilterPreset(ctx: IApiContext, sourceId: string) {
+    const preset = this.sourceFiltersService.views.presetFilterBySourceId(sourceId);
+
+    if (preset) {
+      return this.sourceFiltersService.views.parsePresetValue(preset.settings.image_path as string);
+    }
+
+    return '';
+  }
+
+  @apiMethod()
+  addFilter(
+    ctx: IApiContext,
+    sourceId: string,
+    filterType: TSourceFilterType,
+    filterName: string,
+    settings: Dictionary<TObsValue>,
+  ) {
+    this.sourceFiltersService.add(sourceId, filterType, filterName, settings);
+  }
+
+  @apiMethod()
+  removeFilter(ctx: IApiContext, sourceId: string, filterName: string) {
+    this.sourceFiltersService.remove(sourceId, filterName);
+  }
+
+  @apiMethod()
+  setFilterEnabled(ctx: IApiContext, sourceId: string, filterName: string, enabled: boolean) {
+    this.sourceFiltersService.setVisibility(sourceId, filterName, enabled);
   }
 }

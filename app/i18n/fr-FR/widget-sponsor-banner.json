@@ -1,0 +1,23 @@
+{
+  "Sponsor Banner": "Bannière du sponsor",
+  "Placement": "Emplacement",
+  "Image Layout": "Disposition de l'image",
+  "Image Duration (seconds)": "Durée de l’image (en secondes)",
+  "Add Image": "Ajouter l'image",
+  "Widget Hide Duration": "Durée de masquage du widget",
+  "Widget Show Duration": "Durée d'affichage du widget",
+  "Banner Width": "Largeur de la bannière",
+  "Banner Height": "Hauteur de la bannière",
+  "Image Animation": "Animation de l'image",
+  "Background Color": "Couleur d'arrière-plan",
+  "Transparent": "Transparent",
+  "Single": "Unique",
+  "Double": "Double",
+  "Set to zero to show the widget permanently.": "Définir à zéro pour afficher le widget de façon permanente.",
+  "The amount of time the widget will appear.": "La durée d'apparition du widget.",
+  "These are the animations that are used to show your banner.": "Ce sont les animations qui servent à afficher votre bannière.",
+  "Visual Settings": "Paramètres visuels",
+  "Image Set %{number}": "Jeu d’images %{number}",
+  "No Image": "Aucune image",
+  "Show off rotating media to display your socials, sponsorships, CTAs or just cute animations.": "Montre des supports rotatifs pour afficher tes réseaux sociaux, tes parrainages, tes CTA ou simplement des animations."
+}

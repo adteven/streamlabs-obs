@@ -1,11 +1,14 @@
 import { SettingsService } from 'services/settings';
 import { Inject } from 'services/core/injector';
 import { SceneItem } from 'services/scenes';
-import { VideoService } from 'services/video';
+import { VideoSettingsService } from 'services/settings-v2';
 import { WindowsService } from 'services/windows';
+import { DualOutputService } from 'services/dual-output';
 import { ScalableRectangle } from 'util/ScalableRectangle';
 import { SelectionService } from 'services/selection';
 import { EditorCommandsService } from 'services/editor-commands';
+import { IMouseEvent } from 'services/editor';
+import { byOS, OS } from './operating-systems';
 
 /*
  * An edge looks like:
@@ -55,10 +58,11 @@ interface IDragHandlerOptions {
 // Encapsulates logic for dragging sources in the overlay editor
 export class DragHandler {
   @Inject() private settingsService: SettingsService;
-  @Inject() private videoService: VideoService;
+  @Inject() private videoSettingsService: VideoSettingsService;
   @Inject() private windowsService: WindowsService;
   @Inject() private selectionService: SelectionService;
   @Inject() private editorCommandsService: EditorCommandsService;
+  @Inject() private dualOutputService: DualOutputService;
 
   // Settings
   snapEnabled: boolean;
@@ -76,7 +80,6 @@ export class DragHandler {
   snapDistance: number;
 
   // Sources
-  private draggedSource: SceneItem;
   private otherSources: SceneItem[];
 
   // Mouse properties
@@ -87,33 +90,45 @@ export class DragHandler {
   /**
    * @param startEvent the mouse event for this drag
    * @param options drag handler options
+   * @param draggedSource the selected visual item under the cursor on this display
    */
-  constructor(startEvent: MouseEvent, options: IDragHandlerOptions) {
+
+  constructor(
+    startEvent: IMouseEvent,
+    options: IDragHandlerOptions,
+    private draggedSource: SceneItem,
+  ) {
     // Load some settings we care about
-    this.snapEnabled = this.settingsService.state.General.SnappingEnabled;
-    this.renderedSnapDistance = this.settingsService.state.General.SnapDistance;
-    this.screenSnapping = this.settingsService.state.General.ScreenSnapping;
-    this.sourceSnapping = this.settingsService.state.General.SourceSnapping;
-    this.centerSnapping = this.settingsService.state.General.CenterSnapping;
+    this.snapEnabled = this.settingsService.views.values.General.SnappingEnabled;
+    this.renderedSnapDistance = this.settingsService.views.values.General.SnapDistance;
+    this.screenSnapping = this.settingsService.views.values.General.ScreenSnapping;
+    this.sourceSnapping = this.settingsService.views.values.General.SourceSnapping;
+    this.centerSnapping = this.settingsService.views.values.General.CenterSnapping;
 
     // Load some attributes about the video canvas
-    this.baseWidth = this.videoService.baseWidth;
-    this.baseHeight = this.videoService.baseHeight;
+    const baseRes = this.videoSettingsService.baseResolutions[startEvent.display];
+    this.baseWidth = baseRes.baseWidth;
+    this.baseHeight = baseRes.baseHeight;
+
     this.displaySize = options.displaySize;
     this.displayOffset = options.displayOffset;
-    this.scaleFactor = this.windowsService.state.main.scaleFactor;
+
+    // We don't need to adjust mac coordinates for scale factor
+    this.scaleFactor = byOS({
+      [OS.Windows]: this.windowsService.state.main.scaleFactor,
+      [OS.Mac]: 1,
+    });
+
     this.snapDistance =
       (this.renderedSnapDistance * this.scaleFactor * this.baseWidth) / this.displaySize.x;
 
-    // Load some attributes about sources
-    this.draggedSource = this.selectionService.getLastSelected();
-    this.otherSources = this.selectionService
+    this.otherSources = this.selectionService.views.globalSelection
       .clone()
       .invert()
       .getItems()
       .filter(item => item.isVisualSource);
 
-    const rect = this.draggedSource.getRectangle();
+    const rect = new ScalableRectangle(this.draggedSource.rectangle);
     rect.normalize();
 
     const pos = this.mousePositionInCanvasSpace(startEvent);
@@ -125,9 +140,21 @@ export class DragHandler {
     this.targetEdges = this.generateTargetEdges();
   }
 
-  // Should be called when the mouse moves
-  move(event: MouseEvent) {
-    const rect = this.draggedSource.getRectangle();
+  /**
+   * Should be called when the mouse moves
+   * @remark In dual output mode, scene items are prevented
+   * from moving outside of the editor display. We return a boolean
+   * to show an error message in the notifications component,
+   * which is emitted by the studio editor component.
+   *
+   * @param event - Mouseevent for repositioning the scene item
+   * @returns - boolean with whether or not the mouse move was stopped
+   */
+  //
+  move(event: IMouseEvent) {
+    if (event.display !== this.draggedSource.display) return false;
+
+    const rect = new ScalableRectangle(this.draggedSource.rectangle);
     const denormalize = rect.normalize();
 
     const mousePos = this.mousePositionInCanvasSpace(event);
@@ -136,8 +163,39 @@ export class DragHandler {
     rect.x = mousePos.x - this.mouseOffset.x;
     rect.y = mousePos.y - this.mouseOffset.y;
 
-    // Adjust position for snapping
-    // Holding Ctrl temporary disables snapping
+    /**
+     * In dual output mode, prevent sources from being dragged outside of the canvas
+     * and show an error message when they are dragged too far out
+     */
+    if (this.dualOutputService.views.dualOutputMode) {
+      rect.normalize();
+
+      const dragBoundaries = {
+        left: -rect.scaledWidth - this.displayOffset.x,
+        top: -rect.scaledHeight - this.displayOffset.y,
+        right: this.baseWidth + this.displayOffset.x,
+        bottom: this.baseHeight + this.displayOffset.y,
+      };
+
+      if (rect.x < 0 && rect.x <= dragBoundaries.left) {
+        rect.x = dragBoundaries.left + 0.5;
+        return true;
+      } else if (rect.y < 0 && rect.y <= dragBoundaries.top) {
+        rect.y = dragBoundaries.top + 0.5;
+        return true;
+      } else if (rect.x >= dragBoundaries.right) {
+        rect.x = dragBoundaries.right - 0.5;
+        return true;
+      } else if (rect.y >= dragBoundaries.bottom) {
+        rect.y = dragBoundaries.bottom - 0.5;
+        return true;
+      }
+    }
+
+    /**
+     * Adjust position for snapping
+     * Holding Ctrl temporary disables snapping
+     */
     if (this.snapEnabled && !event.ctrlKey) {
       const sourceEdges = this.generateSourceEdges(rect);
 
@@ -170,29 +228,39 @@ export class DragHandler {
 
     denormalize();
 
-    // Translate new position into a delta that can be applied
-    // to all selected sources equally.
+    /**
+     * Translate new position into a delta that can be applied
+     * to all selected sources equally.
+     */
     const deltaX = rect.x - this.draggedSource.transform.position.x;
     const deltaY = rect.y - this.draggedSource.transform.position.y;
 
     this.editorCommandsService.executeCommand(
       'MoveItemsCommand',
-      this.selectionService.getActiveSelection(),
+      this.selectionService.views.globalSelection,
       { x: deltaX, y: deltaY },
+      event.display,
+    );
+
+    return false;
+  }
+
+  private mousePositionInCanvasSpace(event: IMouseEvent): IVec2 {
+    return this.pageSpaceToCanvasSpace(
+      {
+        x: event.pageX - this.displayOffset.x,
+        y: event.pageY - this.displayOffset.y,
+      },
+      event.display,
     );
   }
 
-  private mousePositionInCanvasSpace(event: MouseEvent): IVec2 {
-    return this.pageSpaceToCanvasSpace({
-      x: event.pageX - this.displayOffset.x,
-      y: event.pageY - this.displayOffset.y,
-    });
-  }
-
-  private pageSpaceToCanvasSpace(vec: IVec2) {
+  private pageSpaceToCanvasSpace(vec: IVec2, display: 'horizontal' | 'vertical' = 'horizontal') {
+    const baseWidth = this.videoSettingsService.baseResolutions[display].baseWidth;
+    const baseHeight = this.videoSettingsService.baseResolutions[display].baseHeight;
     return {
-      x: (vec.x * this.scaleFactor * this.baseWidth) / this.displaySize.x,
-      y: (vec.y * this.scaleFactor * this.baseHeight) / this.displaySize.y,
+      x: (vec.x * this.scaleFactor * baseWidth) / this.displaySize.x,
+      y: (vec.y * this.scaleFactor * baseHeight) / this.displaySize.y,
     };
   }
 
@@ -276,7 +344,7 @@ export class DragHandler {
     // Source edge snapping:
     if (this.sourceSnapping) {
       this.otherSources.forEach(source => {
-        const edges = this.generateSourceEdges(source.getRectangle());
+        const edges = this.generateSourceEdges(new ScalableRectangle(source.rectangle));
 
         // The dragged source snaps to the adjacent edge
         // of other sources.  So the right edge snaps to

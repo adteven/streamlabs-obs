@@ -1,20 +1,29 @@
 <template>
-  <div>
-    <div class="media-box">
-      <div class="url-uploader" v-if="showUrlUpload">
-        {{ $t('Image URL') }}
-        <text-input v-model="url" :metadata="{ placeholder: `${$t('Example')}: https://yoururl.com/image/Streamlabs` }" />
-        <button class="button button--action" @click="uploadUrl">{{ $t('Submit') }}</button>
-      </div>
-      <img :src="value || metadata.clearImage" v-if="!showUrlUpload" >
-      <div class="footer">
-        <span class="filename">{{ fileName || 'Default' }}</span>
-        <div>
-          <i @click="toggleUrlUpload" class="icon-link" />
-          <i @click="previewImage" class="fa fa-search-plus" />
-          <i @click="clearImage" class="icon-close" />
-          <span class="change-media" @click="updateValue">{{ $t('Change Media') }}</span>
-        </div>
+  <div class="media-box">
+    <div class="url-uploader" v-if="showUrlUpload">
+      {{ $t('Image URL') }}
+      <text-input
+        v-model="url"
+        :metadata="{ placeholder: `${$t('Example')}: https://yoururl.com/image/Streamlabs` }"
+      />
+      <button class="button button--action" @click="uploadUrl">{{ $t('Submit') }}</button>
+    </div>
+    <img :src="value || metadata.clearImage" v-if="!/\.webm/.test(value) && !showUrlUpload" />
+    <video
+      v-if="(/\.webm$/.test(value) || /\.mp4$/.test(value)) && !showUrlUpload && value"
+      loop
+      muted
+      autoplay
+      :key="value"
+      :src="value"
+    />
+    <div class="footer">
+      <span class="filename">{{ fileName || 'Default' }}</span>
+      <div>
+        <i @click="toggleUrlUpload" class="icon-link" />
+        <i @click="previewImage" class="fa fa-search-plus" />
+        <i @click="clearImage" class="icon-close" />
+        <span class="change-media" @click="updateValue">{{ $t('Change Media') }}</span>
       </div>
     </div>
   </div>
@@ -23,17 +32,19 @@
 <script lang="ts" src="./MediaGalleryInput.vue.ts"></script>
 
 <style lang="less" scoped>
-@import "../../../styles/index";
+@import '../../../styles/index';
 
 .media-box {
   .radius();
 
   position: relative;
   width: 100%;
+  max-width: 300px;
   height: 120px;
   background-color: var(--section);
 
-  img {
+  img,
+  video {
     max-height: 110px;
     width: auto;
     position: absolute;

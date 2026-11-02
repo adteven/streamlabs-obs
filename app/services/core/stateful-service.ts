@@ -3,8 +3,13 @@ import { Store, Module } from 'vuex';
 import { Service } from './service';
 import Utils from 'services/utils';
 
-export function mutation(options = { unsafe: false }) {
-  return function(target: any, methodName: string, descriptor: PropertyDescriptor) {
+interface IMutationOptions {
+  unsafe?: boolean;
+  sync?: boolean;
+}
+
+export function mutation(options: IMutationOptions = {}) {
+  return function (target: any, methodName: string, descriptor: PropertyDescriptor) {
     return registerMutation(target, methodName, descriptor, options);
   };
 }
@@ -13,17 +18,20 @@ function registerMutation(
   target: any,
   methodName: string,
   descriptor: PropertyDescriptor,
-  options = { unsafe: false },
+  options: IMutationOptions = {},
 ) {
-  const serviceName = target.constructor.name;
-  const mutationName = `${serviceName}.${methodName}`;
+  const serviceName = target.constructor._isHelperFor ?? target.constructor.name;
+  const mutationName = target.constructor._isHelperFor
+    ? `${serviceName}.${target.constructor.name}.${methodName}`
+    : `${serviceName}.${methodName}`;
+  const opts: IMutationOptions = { unsafe: false, sync: true, ...options };
 
   target.originalMethods = target.originalMethods || {};
   target.originalMethods[methodName] = target[methodName];
   target.mutationOptions = target.mutationOptions || {};
-  target.mutationOptions[methodName] = options;
+  target.mutationOptions[methodName] = opts;
   target.mutations = target.mutations || {};
-  target.mutations[mutationName] = function(
+  target.mutations[mutationName] = function (
     localState: any,
     payload: { args: any; constructorArgs: any },
   ) {
@@ -38,7 +46,7 @@ function registerMutation(
 
     let contextProxy = context;
 
-    if (Utils.isDevMode() && !options.unsafe) {
+    if (Utils.isDevMode() && !opts.unsafe) {
       const errorMsg = (key: string) =>
         `Mutation ${mutationName} attempted to access this.${key}. ` +
         'To ensure mutations can safely execute in any context, mutations are restricted ' +
@@ -78,6 +86,7 @@ function registerMutation(
       store.commit(mutationName, {
         args,
         constructorArgs,
+        __vuexSyncIgnore: opts.sync ? undefined : true,
       });
     },
   });
@@ -94,7 +103,7 @@ export function inheritMutations(target: any) {
       registerMutation(
         target.prototype,
         methodName,
-        Object.getOwnPropertyDescriptor(target.prototype, methodName),
+        Object.getOwnPropertyDescriptor(target.prototype, methodName) as PropertyDescriptor,
         baseClassProto.mutationOptions[methodName],
       );
     });
@@ -105,14 +114,15 @@ export function inheritMutations(target: any) {
  * helps to integrate services with Vuex store
  */
 export abstract class StatefulService<TState extends object> extends Service {
-  private static store: Store<any>;
+  static store: Store<any>;
+  static onStateRead: ((serviceName: string) => unknown) | null = null;
 
   static setupVuexStore(store: Store<any>) {
     this.store = store;
   }
 
   static getStore() {
-    if (!this.store) throw 'vuex store is not set';
+    if (!this.store) throw new Error('vuex store is not set');
     return this.store;
   }
 
@@ -121,11 +131,16 @@ export abstract class StatefulService<TState extends object> extends Service {
   }
 
   get state(): TState {
+    StatefulService.onStateRead && StatefulService.onStateRead(this.serviceName);
     return this.store.state[this.serviceName];
   }
 
   set state(newState: TState) {
     Vue.set(this.store.state, this.serviceName, newState);
+  }
+
+  get views(): ViewHandler<TState> | void {
+    return;
   }
 }
 
@@ -139,7 +154,9 @@ export function getModule(ModuleContainer: any): Module<any, any> {
   // filter inherited mutations
   for (const mutationName in prototypeMutations) {
     const serviceName = mutationName.split('.')[0];
-    if (serviceName !== ModuleContainer.name) continue;
+    if (serviceName !== (ModuleContainer._isHelperFor ?? ModuleContainer.name)) continue;
+    // TODO: index
+    // @ts-ignore
     mutations[mutationName] = prototypeMutations[mutationName];
   }
 
@@ -153,7 +170,27 @@ export function getModule(ModuleContainer: any): Module<any, any> {
 
 // tslint:disable-next-line:function-name
 export function InheritMutations(): ClassDecorator {
-  return function(target: any) {
+  return function (target: any) {
     inheritMutations(target);
   };
+}
+
+/**
+ * A class that exposes the state views of a service. Views are
+ * different ways of looking at the internal state of a service.
+ * Views may combine information from other services by accessing
+ * the views of other services. However, they may not directly access
+ * the state of other services.
+ */
+export abstract class ViewHandler<TState extends object> {
+  constructor(public readonly state: TState) {}
+
+  protected getServiceViews<TService extends new (...args: any[]) => StatefulService<any>>(
+    service: TService,
+  ): InstanceType<TService>['views'] {
+    // TODO: Working around circular reference
+    // TODO: index
+    // @ts-ignore
+    return window['servicesManager'].getResource(service.name).views;
+  }
 }

@@ -7,20 +7,24 @@ import { TextNode } from './nodes/overlays/text';
 import { WebcamNode } from './nodes/overlays/webcam';
 import { VideoNode } from './nodes/overlays/video';
 import { TransitionNode } from './nodes/overlays/transition';
+import { GameCaptureNode } from './nodes/overlays/game-capture';
 import { parse } from './parse';
 import { StreamlabelNode } from './nodes/overlays/streamlabel';
 import { WidgetNode } from './nodes/overlays/widget';
+import { IconLibraryNode } from './nodes/overlays/icon-library';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import extractZip from 'extract-zip';
-import archiver from 'archiver';
-import https from 'https';
 import { ScenesService } from 'services/scenes';
 import { SelectionService } from 'services/selection';
 import uuid from 'uuid/v4';
 import { SceneSourceNode } from './nodes/overlays/scene';
 import { AppService } from 'services/app';
+import { importExtractZip } from '../../util/slow-imports';
+import { downloadFile, IDownloadProgress } from 'util/requests';
+import { NodeMapNode } from './nodes/node-map';
+import { SmartBrowserNode } from './nodes/overlays/smartBrowserSource';
+import { createExclusiveWriteStream } from 'util/safe-file';
 
 const NODE_TYPES = {
   RootNode,
@@ -34,13 +38,11 @@ const NODE_TYPES = {
   WidgetNode,
   TransitionNode,
   SceneSourceNode,
+  GameCaptureNode,
+  IconLibraryNode,
+  NodeMapNode,
+  SmartBrowserNode,
 };
-
-export interface IDownloadProgress {
-  totalBytes: number;
-  downloadedBytes: number;
-  percent: number;
-}
 
 export class OverlaysPersistenceService extends Service {
   @Inject() private scenesService: ScenesService;
@@ -53,30 +55,8 @@ export class OverlaysPersistenceService extends Service {
   async downloadOverlay(url: string, progressCallback?: (progress: IDownloadProgress) => void) {
     const overlayFilename = `${uuid()}.overlay`;
     const overlayPath = path.join(os.tmpdir(), overlayFilename);
-    const fileStream = fs.createWriteStream(overlayPath);
 
-    await new Promise((resolve, reject) => {
-      https.get(url).on('response', response => {
-        const totalSize = parseInt(response.headers['content-length'], 10);
-        let downloaded = 0;
-
-        response.on('data', (chunk: any) => {
-          fileStream.write(chunk);
-          downloaded += chunk.length;
-
-          if (progressCallback) {
-            progressCallback({
-              totalBytes: totalSize,
-              downloadedBytes: downloaded,
-              percent: downloaded / totalSize,
-            });
-          }
-        });
-
-        response.on('end', () => resolve());
-        response.on('error', (err: any) => reject(err));
-      });
-    });
+    await downloadFile(url, overlayPath, progressCallback);
 
     return overlayPath;
   }
@@ -87,7 +67,9 @@ export class OverlaysPersistenceService extends Service {
 
     this.ensureOverlaysDirectory();
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>(async (resolve, reject) => {
+      // import of extractZip takes to much time on startup, so import it dynamically
+      const extractZip = (await importExtractZip()).default;
       extractZip(overlayFilePath, { dir: assetsPath }, err => {
         if (err) {
           reject(err);
@@ -99,34 +81,42 @@ export class OverlaysPersistenceService extends Service {
 
     const configPath = path.join(assetsPath, 'config.json');
     const data = fs.readFileSync(configPath).toString();
+
     const root = parse(data, NODE_TYPES);
     await root.load({ assetsPath });
 
-    this.scenesService.makeSceneActive(this.scenesService.scenes[0].id);
-    this.selectionService.reset();
+    this.scenesService.makeSceneActive(this.scenesService.views.scenes[0].id);
+    this.selectionService.views.globalSelection.reset();
   }
 
   async saveOverlay(overlayFilePath: string) {
     const root = new RootNode();
     const assetsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-assets'));
 
-    await root.save({ assetsPath });
-    const config = JSON.stringify(root, null, 2);
-    const configPath = path.join(assetsPath, 'config.json');
-    fs.writeFileSync(configPath, config);
+    try {
+      await root.save({ assetsPath });
+      const config = JSON.stringify(root, null, 2);
+      const configPath = path.join(assetsPath, 'config.json');
+      fs.writeFileSync(configPath, config);
 
-    const output = fs.createWriteStream(overlayFilePath);
-    const archive = archiver('zip', { zlib: { level: 9 } });
+      const output = createExclusiveWriteStream(overlayFilePath);
+      // import of archiver takes to much time on startup, so import it dynamically
+      const archiver = (await import('archiver')).default;
+      const archive = archiver('zip', { zlib: { level: 9 } });
 
-    await new Promise(resolve => {
-      output.on('close', (err: any) => {
-        resolve();
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', () => resolve());
+        output.on('error', reject);
+        archive.on('error', reject);
+
+        archive.pipe(output);
+        archive.directory(assetsPath, false);
+        archive.finalize();
       });
-
-      archive.pipe(output);
-      archive.directory(assetsPath, false);
-      archive.finalize();
-    });
+    } finally {
+      // These staging copies are the full uncompressed size of the collection.
+      fs.rmSync(assetsPath, { recursive: true, force: true });
+    }
   }
 
   ensureOverlaysDirectory() {

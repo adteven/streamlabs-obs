@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Zakázaná média",
+  "Price Per Second": "Cena za sekundu",
+  "Min. Amount to Share": "Min. částka, která se bude sdílet",
+  "Max Duration": "Maximální doba trvání",
+  "Buffer Time": "Čas bufferu",
+  "Spam Security": "Ochrana proti spamu",
+  "The time between videos the next video has to buffer.": "Čas mezi videi, během kterého se bude načítat následující video.",
+  "Manage Media Settings": "Spravovat nastavení médií",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "Minimální částka, kterou musí dárce poslat, než bude možné sdílet média. Výchozí částka je 5 USD"
+}

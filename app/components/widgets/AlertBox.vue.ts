@@ -6,48 +6,18 @@ import VFormGroup from 'components/shared/inputs/VFormGroup.vue';
 import { IAlertBoxData, AlertBoxService } from 'services/widgets/settings/alert-box';
 import { $t } from 'services/i18n';
 
-import ValidatedForm from 'components/shared/inputs/ValidatedForm.vue';
+import ValidatedForm from 'components/shared/inputs/ValidatedForm';
 import { Inject } from 'services/core/injector';
 import { IAlertBoxVariation } from 'services/widgets/settings/alert-box/alert-box-api';
-
-const alertNameMap = () => ({
-  bits: $t('Bits'),
-  donations: $t('Donations'),
-  donordrive: $t('Charity Streaming Donations'),
-  patreon: $t('Patreon Pledges'),
-  extraLife: $t('Extra Life Donations'),
-  justGiving: $t('JustGiving Donations'),
-  merch: $t('Merch'),
-  resubs: $t('Resubs'),
-  gamewisp: $t('Gamewisp Subscriptions'),
-  subs: $t('Subscriptions'),
-  tiltify: $t('Tiltify Donations'),
-  treat: $t('TreatStream'),
-  follows: $t('Follows'),
-  hosts: $t('Hosts'),
-  raids: $t('Raids'),
-  superhearts: $t('Super Hearts'),
-  fanfunding: $t('Super Chat'),
-  sponsors: $t('Members'),
-  subscribers: $t('Subscribers'), // YouTube
-  stars: $t('Stars'),
-  support: $t('Support'),
-  likes: $t('Likes'),
-  shares: $t('Shares'),
-  fbfollows: $t('Follows'),
-  loyaltystore: $t('Cloudbot Redemption'),
-  stickers: $t('Stickers'),
-  effects: $t('Effects/Rallies'),
-});
+import { alertNameMap } from '../../services/widgets/settings/alert-box/alert-box-data';
 
 const triggerAmountMap = {
   bits: 'bits_alert_min_amount',
   donations: 'donation_alert_min_amount',
-  hosts: 'host_viewer_minimum',
   raids: 'raid_raider_minimum',
 };
 
-const HAS_ALERT_SETTINGS = ['donations', 'bits', 'hosts', 'raids', 'effects', 'stickers'];
+const HAS_ALERT_SETTINGS = ['donations', 'bits', 'effects', 'raids', 'stickers'];
 const HAS_DONOR_MESSAGE = [
   'donations',
   'bits',
@@ -71,18 +41,24 @@ const HAS_DONOR_MESSAGE = [
   },
 })
 export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxService> {
-  @Inject() alertBoxService: AlertBoxService;
+  @Inject() alertBoxService!: AlertBoxService;
 
   $refs: { [key: string]: HTMLElement };
 
   afterFetch() {
+    // TODO: index
+    // @ts-ignore
     this.alertTypes = this.alertTypes.filter(type => this.wData.settings[type]);
     const languages = this.wData.tts_languages;
     this.languages = Object.keys(languages)
       .map(category => ({
         label: category,
+        // TODO: index
+        // @ts-ignore
         options: Object.keys(languages[category]).map(key => ({
           value: key,
+          // TODO: index
+          // @ts-ignore
           label: languages[category][key],
         })),
       }))
@@ -90,6 +66,8 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
   }
 
   alertName(alertType: string) {
+    // TODO: index
+    // @ts-ignore
     return alertNameMap()[alertType];
   }
 
@@ -113,6 +91,8 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
     if (this.selectedAlert === 'general') {
       return this.wData;
     }
+    // TODO: index
+    // @ts-ignore
     return this.wData.settings[this.selectedAlert].variations.find(
       (variation: IAlertBoxVariation) => variation.id === this.selectedId,
     );
@@ -137,7 +117,7 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
         label: this.selectedAlert === 'subs' ? $t('Resub Message') : $t('Donor Message'),
       });
     }
-    if (HAS_ALERT_SETTINGS.includes(this.selectedAlert) || this.selectedId !== 'default') {
+    if (HAS_ALERT_SETTINGS.includes(this.selectedAlert) || !this.selectedId.match('default')) {
       baseItems.push({ value: 'alert', label: $t('Alert Settings') });
     }
     return baseItems;
@@ -152,10 +132,14 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
   }
 
   get minTriggerAmount() {
+    // TODO: index
+    // @ts-ignore
     return this.wData.settings[triggerAmountMap[this.selectedAlert]];
   }
 
   set minTriggerAmount(value: number) {
+    // TODO: index
+    // @ts-ignore
     this.wData.settings[triggerAmountMap[this.selectedAlert]] = value;
   }
 
@@ -173,9 +157,17 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
     }
   }
 
+  handleUnlimitedModerationDelay(value: boolean) {
+    if (value) {
+      this.wData.settings.moderation_delay = -1;
+    } else {
+      this.wData.settings.moderation_delay = 0;
+    }
+  }
+
   selectAlertType(alertName: string) {
-    this.selectedId = 'default';
     this.selectedAlert = this.selectedAlert === alertName ? 'general' : alertName;
+    this.selectedId = `default-${this.selectedAlert}`;
   }
 
   selectVariation(id: string) {
@@ -188,6 +180,8 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
 
   addAlert(type: string) {
     const newVariation = this.alertBoxService.newVariation(type);
+    // TODO: index
+    // @ts-ignore
     this.wData.settings[type].variations.push(newVariation);
     this.selectedAlert = type;
     this.addAlertMenuOpen = false;
@@ -196,7 +190,9 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
   }
 
   removeVariation(id: string) {
-    this.selectedId = 'default';
+    this.selectedId = `default-${this.selectedAlert}`;
+    // TODO: index
+    // @ts-ignore
     this.wData.settings[this.selectedAlert].variations = this.wData.settings[
       this.selectedAlert
     ].variations.filter((variation: IAlertBoxVariation) => variation.id !== id);
@@ -208,7 +204,9 @@ export default class AlertBox extends WidgetSettings<IAlertBoxData, AlertBoxServ
     this.selectedId = id;
     // Above is done here with a stop propagation in the input to avoid possible race conditions which would lead to
     // this.selectedVariation potentially being incorrect
-    const field = <HTMLInputElement>this.$refs[`${id}-name-input`][0];
+    // TODO: index
+    // @ts-ignore
+    const field: HTMLInputElement = this.$refs[`${id}-name-input`][0];
     this.$nextTick(() => field.focus());
   }
 

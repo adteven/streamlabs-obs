@@ -2,6 +2,7 @@ import { Node } from './node';
 import { TransitionsService, ETransitionType } from 'services/transitions';
 import { Inject } from 'services/core/injector';
 import { TObsValue } from 'components/obs/inputs/ObsInput';
+import { $t } from 'services/i18n';
 
 interface ITransition {
   id: string;
@@ -91,10 +92,18 @@ export class TransitionsNode extends Node<ISchema, {}> {
     if (version === 1) {
       const transition: ITransition = {
         id: null,
-        name: 'Global Transition',
+        name: $t('Global Transition'),
+        // TODO: index
+        // @ts-ignore
         type: this.data['type'],
+        // TODO: index
+        // @ts-ignore
         duration: this.data['duration'],
+        // TODO: index
+        // @ts-ignore
         settings: this.data['settings'],
+        // TODO: index
+        // @ts-ignore
         propertiesManagerSettings: this.data['propertiesManagerSettings'],
       };
       this.data.transitions = [transition];

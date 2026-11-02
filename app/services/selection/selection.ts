@@ -11,34 +11,59 @@ import {
   ISceneItemSettings,
   ISceneItemNode,
   IPartialTransform,
+  EScaleType,
+  EBlendingMode,
+  EBlendingMethod,
 } from 'services/scenes';
-import { Source } from 'services/sources';
+import { EDeinterlaceFieldOrder, EDeinterlaceMode, Source } from 'services/sources';
 import { Rect } from 'util/rect';
 import { AnchorPoint, AnchorPositions, CenteringAxis } from 'util/ScalableRectangle';
 import { ISelectionState, TNodesList } from './index';
+import { DualOutputService } from 'services/dual-output';
+import { TDisplayType } from 'services/settings-v2';
 
 /**
  * Helper for working with multiple sceneItems
  */
-@ServiceHelper()
+@ServiceHelper('SelectionService')
 export class Selection {
-  @Inject() private scenesService: ScenesService;
+  @Inject() scenesService: ScenesService;
+  @Inject() dualOutputService: DualOutputService;
 
   _resourceId: string;
 
-  private state: ISelectionState = {
+  /**
+   * Once a selection has been frozen, the selected items
+   * cannot be changed. This is mostly used for keeping
+   * undo/redo history when working with the GlobalSelection.
+   */
+  isFrozen = false;
+
+  private _state: ISelectionState = {
     selectedIds: [],
     lastSelectedId: '',
   };
 
-  constructor(public sceneId: string, itemsList: TNodesList = []) {
-    this.select(itemsList);
+  protected get state() {
+    return this._state;
+  }
+
+  public get sceneId() {
+    return this._sceneId;
+  }
+
+  constructor(protected _sceneId: string, itemsList: TNodesList = []) {
+    if (_sceneId && itemsList) this.select(itemsList);
+  }
+
+  isDestroyed(): boolean {
+    return false;
   }
 
   // SELECTION METHODS
 
   getScene(): Scene {
-    return this.scenesService.getScene(this.sceneId);
+    return this.scenesService.views.getScene(this.sceneId);
   }
 
   add(itemsList: TNodesList): Selection {
@@ -47,8 +72,17 @@ export class Selection {
     return this;
   }
 
+  freeze() {
+    this.isFrozen = true;
+  }
+
   select(itemsList: TNodesList): Selection {
+    if (this.isFrozen) {
+      throw new Error('Attempted to modify frozen selection');
+    }
+
     let ids = this.resolveItemsList(itemsList);
+
     ids = uniq(ids);
     const scene = this.getScene();
 
@@ -90,12 +124,17 @@ export class Selection {
   }
 
   /**
-   * return items with the order as in the scene
+   * Return items with the order as in the scene
+   *
+   * @param display - Optional, display to filter the selection by,
+   * primarily used for mouse events in the editor
    */
-  getItems(): SceneItem[] {
+  getItems(display?: TDisplayType): SceneItem[] {
     const scene = this.getScene();
     if (!this.getSize()) return [];
-    return scene.getItems().filter(item => this.state.selectedIds.includes(item.id));
+
+    const items = scene.getItems().filter(item => this.state.selectedIds.includes(item.id));
+    return display ? items.filter(item => item.display === display) : items;
   }
 
   /**
@@ -104,7 +143,11 @@ export class Selection {
   getNodes(): TSceneNode[] {
     const scene = this.getScene();
     if (!this.getSize()) return [];
-    return scene.getNodes().filter(node => this.state.selectedIds.includes(node.id));
+
+    const nodes = scene.getNodes();
+    const ids = this.state.selectedIds;
+
+    return nodes.filter(node => node && ids.includes(node.id));
   }
 
   /**
@@ -127,15 +170,43 @@ export class Selection {
    * true if selections has only one folder
    */
   isSceneFolder(): boolean {
-    const folders = this.getFolders();
-    if (folders.length !== 1) return false;
-    const folder = folders[0];
-    const isNotFolderChild = this.getItems().find(item => item.parentId !== folder.id);
-    return !isNotFolderChild;
+    const rootNodes = this.getRootNodes();
+    return rootNodes.length === 1 && rootNodes[0].sceneNodeType === 'folder';
   }
 
-  getVisualItems(): SceneItem[] {
-    return this.getItems().filter(item => item.isVisualSource);
+  isScaleFilterSelected(filter: EScaleType): boolean {
+    const items = this.getItems().filter(item => item.scaleFilter === filter);
+    return items.length > 0;
+  }
+
+  isBlendingModeSelected(mode: EBlendingMode): boolean {
+    const items = this.getItems().filter(item => item.blendingMode === mode);
+    return items.length > 0;
+  }
+
+  isBlendingMethodSelected(method: EBlendingMethod): boolean {
+    const items = this.getItems().filter(item => item.blendingMethod === method);
+    return items.length > 0;
+  }
+
+  isDeinterlacingModeSelected(mode: EDeinterlaceMode): boolean {
+    const items = this.getItems().filter(item => item.source.deinterlaceMode === mode);
+    return items.length > 0;
+  }
+
+  isDeinterlacingFieldOrderSelected(order: EDeinterlaceFieldOrder): boolean {
+    const items = this.getItems().filter(item => item.source.deinterlaceFieldOrder === order);
+    return items.length > 0;
+  }
+
+  getVisualItems(display?: TDisplayType): SceneItem[] {
+    const items = this.getItems().filter(item => item.isVisualSource);
+    return display ? items.filter(item => item.display === display) : items;
+  }
+
+  isGameCaptureSelected(): boolean {
+    const items = this.getItems().filter(item => item.source.type === 'game_capture');
+    return items.length > 0;
   }
 
   /**
@@ -166,8 +237,8 @@ export class Selection {
     return this.state.selectedIds.length;
   }
 
-  getBoundingRect(): Rect {
-    const items = this.getVisualItems();
+  getBoundingRect(display?: TDisplayType): Rect {
+    const items = this.getVisualItems(display);
     if (!items.length) return null;
 
     let minTop = Infinity;
@@ -219,7 +290,7 @@ export class Selection {
 
   copyTo(sceneId: string, folderId?: string, duplicateSources = false): TSceneNode[] {
     const insertedNodes: TSceneNode[] = [];
-    const scene = this.scenesService.getScene(sceneId);
+    const scene = this.scenesService.views.getScene(sceneId);
     const foldersMap: Dictionary<string> = {};
     let prevInsertedNode: TSceneNode;
     let insertedNode: TSceneNode;
@@ -241,7 +312,7 @@ export class Selection {
     // copy items and folders structure
     this.getNodes().forEach(sceneNode => {
       if (sceneNode.isFolder()) {
-        insertedNode = scene.createFolder(sceneNode.name);
+        insertedNode = scene.createFolder(sceneNode.name, { display: sceneNode?.display });
         foldersMap[sceneNode.id] = insertedNode.id;
         insertedNodes.push(insertedNode);
       } else if (sceneNode.isItem()) {
@@ -249,6 +320,7 @@ export class Selection {
           sourcesMap[sceneNode.sourceId]
             ? sourcesMap[sceneNode.sourceId].sourceId
             : sceneNode.sourceId,
+          { display: sceneNode?.display },
         );
         insertedNode.setSettings(sceneNode.getSettings());
         insertedNodes.push(insertedNode);
@@ -287,7 +359,7 @@ export class Selection {
    * in the selection is visible.
    */
   isVisible(): boolean {
-    return !!this.getItems().find(item => item.visible);
+    return this.getItems().some(item => item.visible);
   }
 
   /**
@@ -295,7 +367,23 @@ export class Selection {
    * selection are locked.
    */
   isLocked(): boolean {
-    return !this.getItems().find(item => !item.locked);
+    return this.getItems().every(item => item.locked);
+  }
+
+  /**
+   * Helper method to check if any items in the selection
+   * are locked.
+   */
+  isAnyLocked(): boolean {
+    return this.getItems().some(item => item.locked);
+  }
+
+  isStreamVisible(): boolean {
+    return this.getItems().every(item => item.streamVisible);
+  }
+
+  isRecordingVisible(): boolean {
+    return this.getItems().every(item => item.recordingVisible);
   }
 
   /**
@@ -370,6 +458,14 @@ export class Selection {
 
   // SCENE_ITEM METHODS
 
+  setStreamVisible(streamVisible: boolean) {
+    this.getItems().forEach(item => item.setStreamVisible(streamVisible));
+  }
+
+  setRecordingVisible(recordingVisible: boolean) {
+    this.getItems().forEach(item => item.setRecordingVisible(recordingVisible));
+  }
+
   setSettings(settings: Partial<ISceneItemSettings>) {
     this.getItems().forEach(item => item.setSettings(settings));
   }
@@ -384,6 +480,26 @@ export class Selection {
 
   resetTransform() {
     this.getItems().forEach(item => item.resetTransform());
+  }
+
+  setScaleFilter(filter: EScaleType) {
+    this.getItems().forEach(item => item.setScaleFilter(filter));
+  }
+
+  setBlendingMode(mode: EBlendingMode) {
+    this.getItems().forEach(item => item.setBlendingMode(mode));
+  }
+
+  setBlendingMethod(method: EBlendingMethod) {
+    this.getItems().forEach(item => item.setBlendingMethod(method));
+  }
+
+  setDeinterlaceMode(mode: EDeinterlaceMode) {
+    this.getItems().forEach(item => item.source.setDeinterlaceMode(mode));
+  }
+
+  setDeinterlaceFieldOrder(order: EDeinterlaceFieldOrder) {
+    this.getItems().forEach(item => item.source.setDeinterlaceFieldOrder(order));
   }
 
   /**
@@ -416,23 +532,23 @@ export class Selection {
   }
 
   stretchToScreen() {
-    this.getItems().forEach(item => item.stretchToScreen());
+    this.getItems().forEach(item => item.stretchToScreen(item.display));
   }
 
   fitToScreen() {
-    this.getItems().forEach(item => item.fitToScreen());
+    this.getItems().forEach(item => item.fitToScreen(item.display));
   }
 
   centerOnScreen() {
-    this.getItems().forEach(item => item.centerOnScreen());
+    this.getItems().forEach(item => item.centerOnScreen(item.display));
   }
 
   centerOnHorizontal() {
-    this.getItems().forEach(item => item.centerOnAxis(CenteringAxis.X));
+    this.getItems().forEach(item => item.centerOnAxis(CenteringAxis.X, item.display));
   }
 
   centerOnVertical() {
-    this.getItems().forEach(item => item.centerOnAxis(CenteringAxis.Y));
+    this.getItems().forEach(item => item.centerOnAxis(CenteringAxis.Y, item.display));
   }
 
   rotate(deg: number) {
@@ -444,7 +560,7 @@ export class Selection {
   }
 
   remove() {
-    this.getNodes().forEach(node => node.remove());
+    this.getNodes().forEach(node => !node.isDestroyed() && node.remove());
   }
 
   nudgeLeft() {
@@ -507,7 +623,7 @@ export class Selection {
     return [itemsList.id];
   }
 
-  private setState(state: Partial<ISelectionState>) {
+  protected setState(state: Partial<ISelectionState>) {
     Object.assign(this.state, state);
   }
 }

@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Запрещенные медиафайлы",
+  "Price Per Second": "Цена за секунду",
+  "Min. Amount to Share": "Мин. сумма для показа",
+  "Max Duration": "Макс. длительность",
+  "Buffer Time": "Время буфера",
+  "Spam Security": "Защита от спама",
+  "The time between videos the next video has to buffer.": "Интервал времени между видео для буферизации следующего видео.",
+  "Manage Media Settings": "Управление медианастройками",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "Минимальная сумма пожертвования для получения возможности поделиться мультимедиа. По умолчанию: 5 долл. США"
+}

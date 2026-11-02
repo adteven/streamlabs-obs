@@ -1,71 +1,76 @@
-import { useSpectron, test, focusMain } from '../../helpers/spectron';
+import { useWebdriver, test } from '../../helpers/webdriver';
 import { disableGifAnimations, makeScreenshots, useScreentest } from '../screenshoter';
-import { logIn } from '../../helpers/spectron/user';
+import { logIn } from '../../helpers/webdriver/user';
 import { spawnSync } from 'child_process';
 import { sleep } from '../../helpers/sleep';
+import { focusMain } from '../../helpers/modules/core';
 const path = require('path');
 const _7z = require('7zip')['7z'];
 
-useSpectron({ skipOnboarding: false, appArgs: '--nosync' });
+useWebdriver({ skipOnboarding: false });
 useScreentest();
 
 test('Onboarding steps', async t => {
   const app = t.context.app;
-  await focusMain(t);
+  await focusMain();
 
   // Wait for the auth screen to appear
-  await app.client.waitForVisible('button=Twitch');
+  await (await app.client.$('h1=Connect')).waitForDisplayed();
 
-  await logIn(t, 'twitch', null, false, true);
+  await logIn(t, 'twitch', { prime: false }, false, true);
   await sleep(1000);
-  await t.context.app.client.click('span=Skip');
+  await (await t.context.app.client.$('span=Skip')).click();
 
-  await app.client.waitForVisible('h2=Start Fresh', 15000);
+  await (await app.client.$('h2=Start Fresh')).waitForDisplayed();
   await makeScreenshots(t, 'Start fresh or import from OBS');
-  await app.client.click('h2=Start Fresh');
+  await (await app.client.$('h2=Start Fresh')).click();
 
-  await app.client.waitForVisible('h1=Add a Theme');
+  await (await app.client.$('h1=Set Up Mic and Webcam')).waitForDisplayed();
+  await makeScreenshots(t, 'Setup Mic and Webcam');
+  await (await app.client.$('button=Skip')).click();
+
+  await (await app.client.$('h1=Add a Theme')).waitForDisplayed();
   await makeScreenshots(t, 'Add a Theme');
-  await app.client.click('p=Skip');
+  await (await app.client.$('button=Skip')).click();
 
-  await app.client.waitForVisible('h1=Optimize');
-  await makeScreenshots(t, 'Before optimize');
-  await app.client.click('button=Start');
-  await app.client.waitForVisible('h1=Optimizing... 33%');
-  await makeScreenshots(t, 'Optimization progress');
+  await (await app.client.$('h1=Choose your Streamlabs plan')).waitForDisplayed({ timeout: 15000 });
+  await makeScreenshots(t, 'Ultra');
+  await (await app.client.$('div=Current Plan')).click();
 
   // success?
-  await app.client.waitForVisible('h2=Sources', 60000);
+  await (await app.client.$('span=Sources')).waitForDisplayed({ timeout: 60000 });
   await makeScreenshots(t, 'Onboarding completed');
   t.pass();
-
 });
 
 test('OBS Importer', async t => {
   const client = t.context.app.client;
 
   // extract OBS config to the cache dir
-  const cacheDir = path.resolve(await t.context.app.electron.remote.app.getPath('userData'), '..');
-  const dataDir = path.resolve(__dirname, '..', '..', 'test', 'data');
+  const cacheDir = path.resolve(await t.context.app.electron.app.getPath('userData'), '..');
+  const dataDir = path.resolve(__dirname, '..', '..', '..', '..', 'test', 'data');
   const obsCacheZipPath = path.resolve(dataDir, 'obs-studio.zip');
-  spawnSync(_7z, ['x', obsCacheZipPath, `-o${cacheDir}`]);
+  const result = spawnSync(_7z, ['x', obsCacheZipPath, `-o${cacheDir}`]);
+
+  if (result.status) {
+    console.error(result.stderr.toString());
+    throw new Error('Error setting up OBS Studio cache directory!');
+  }
 
   // skip auth
-  await client.waitForVisible('button=Twitch');
-  await t.context.app.client.click('span=Skip');
+  await (await client.$('h1=Connect')).waitForDisplayed();
+  await (await client.$('span=Skip')).click();
 
   // import from OBS
-  await client.waitForVisible('h2=Import from OBS');
-  await makeScreenshots(t, 'Import button');
-  await client.click('h2=Import from OBS');
+  await (await client.$('h2=Import from OBS')).waitForDisplayed();
+  await (await client.$('h2=Import from OBS')).click();
 
-  // benefits page
-  await client.waitForVisible('h1=A few benefits of using Streamlabs OBS');
-  await makeScreenshots(t, 'Benefits');
-  await client.click('button=Complete');
+  await (await client.$('h1=Importing Your Existing Settings From OBS')).waitForDisplayed();
+  await makeScreenshots(t, 'Import button');
+  await (await client.$('h2=Start')).click();
 
   // success?
-  await client.waitForVisible('h2=Sources', 60000);
+  await (await client.$('span=Sources')).waitForDisplayed({ timeout: 60000 });
   await makeScreenshots(t, 'Import from OBS is completed');
   t.pass();
 });

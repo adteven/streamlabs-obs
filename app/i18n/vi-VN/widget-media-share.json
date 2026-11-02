@@ -1,0 +1,11 @@
+{
+  "Banned Media": "Banned Media",
+  "Price Per Second": "Giá mỗi giây",
+  "Min. Amount to Share": "Khoản tối thiểu để chia sẻ",
+  "Max Duration": "Thời lượng tối đa",
+  "Buffer Time": "Buffer Time",
+  "Spam Security": "Spam Security",
+  "The time between videos the next video has to buffer.": "The time between videos the next video has to buffer.",
+  "Manage Media Settings": "Manage Media Settings",
+  "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD": "The minimum amount a donor must donate in order to share media. The default value is $5.00 USD"
+}

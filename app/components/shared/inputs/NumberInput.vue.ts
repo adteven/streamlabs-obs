@@ -2,17 +2,7 @@ import { Component, Prop } from 'vue-property-decorator';
 import { BaseInput } from './BaseInput';
 import { INumberMetadata } from './index';
 
-@Component({
-  watch: {
-    value(value) {
-      // TODO: This is a poor pattern. This component should not cache the
-      // displayValue and should instead compute it based on value to retain
-      // full reactivity with the underlying data
-      // @ts-ignore
-      this.displayValue = this.value == null ? this.defaultDisplayValue : String(this.value);
-    },
-  },
-})
+@Component({})
 export default class NumberInput extends BaseInput<number | string, INumberMetadata> {
   @Prop()
   readonly value: number | string; // the string type is for empty field
@@ -43,7 +33,7 @@ export default class NumberInput extends BaseInput<number | string, INumberMetad
 
   private updateValue(value: string) {
     const formattedValue = String(isNaN(parseInt(value, 10)) ? 0 : parseInt(value, 10));
-    this.displayValue = formattedValue;
+    this.displayValue = value == null ? this.defaultDisplayValue : formattedValue;
     this.emitInput(formattedValue);
   }
 
@@ -52,8 +42,13 @@ export default class NumberInput extends BaseInput<number | string, INumberMetad
     this.emitInput(value);
   }
 
+  handleBlur(event: Event) {
+    super.emitBlur(event);
+  }
+
   handleInput(value: string) {
     this.displayValue = value;
+    if (value === '-' || value === '') return;
     if (this.options.isInteger) {
       this.updateValue(value);
     } else {
@@ -72,8 +67,8 @@ export default class NumberInput extends BaseInput<number | string, INumberMetad
   private adjust(val: number) {
     if (this.options.disabled) return;
     const newVal = Number(this.displayValue) + val;
-    const min = this.options.min !== void 0 ? this.options.min : -Infinity;
-    const max = this.options.max !== void 0 ? this.options.max : Infinity;
+    const min = this.options.min ?? -Infinity;
+    const max = this.options.max ?? Infinity;
     if (newVal < min || newVal > max) return;
     this.updateValue(String(newVal));
   }

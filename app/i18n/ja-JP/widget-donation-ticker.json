@@ -1,0 +1,23 @@
+{
+  "Message Format": "メッセージ形式",
+  "Max Donations": "最大ドネーション",
+  "Text Scroll Speed": "テキストスクロール速度",
+  "Background Color": "背景色",
+  "Font": "フォント",
+  "Font Size": "フォントサイズ",
+  "Font Weight": "フォント太さ",
+  "Text Color": "テキスト色",
+  "Name Text Color": "テキスト色に名前を付ける",
+  "Amount Text Color": "金額テキスト色",
+  "The name of the donator,": "寄付者の名前",
+  "The amount that was donated": "寄付された金額",
+  "Manage List": "リストを管理",
+  "Font Settings": "フォント設定",
+  "A hex color for the text of the": "テキストの 16 進数の色",
+  "token": "トークン",
+  "Each donation that shows in the donation ticker will be in this format. Available tokens:": "ドネーションティッカーに表示されるそれぞれのドネーションは、このフォーマットになります。利用可能なトークン：",
+  "The maximum amount of donations to show in the ticker. Must be a number greater than 0.": "ティッカーに表示されるドネーションの最大額。0 より大きい数にしてください。",
+  "How fast the ticker should scroll between 1 (fastest) and 10 (slowest). Set to 0 for no scrolling.": "ティッカーが 1（最も速い）から 10（最も遅い）までスクロールする速度。スクロールしない場合は 0 に設定します。",
+  "The font size in pixels. Reasonable size typically ranges between 24px and 48px.": "フォントサイズ（ピクセル単位）。妥当なサイズは通常、24px～48px の範囲になります。",
+  "How thick to make the font. The value should range between 300 (thinnest) and 900 (thickest)": "フォントの太さ。値は 300（最も細い）から 900（最も太い）の間で指定する必要があります。"
+}

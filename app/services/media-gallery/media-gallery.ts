@@ -6,16 +6,51 @@ import { UserService } from 'services/user';
 import { HostsService } from 'services/hosts';
 import { WindowsService } from 'services/windows';
 import uuid from 'uuid';
-import { stockImages, stockSounds } from './stock-library';
 import { $t } from '../i18n';
+import { jfetch } from 'util/requests';
 
 export interface IMediaGalleryFile {
   href: string;
-  fileName: string;
+  filename: string;
   size: number;
   type: string;
   isStock: boolean;
+  prime?: boolean;
 }
+
+interface IMediaGalleryStockFile {
+  type: string;
+  href: string;
+  filename: string;
+}
+
+interface IMediaGalleryStockImageFile extends IMediaGalleryStockFile {
+  type: 'image';
+  thumb: string;
+  // Game Pulse / Reactive properties
+  tags?: string[];
+  event?: string;
+  style?: string;
+}
+
+interface IMediaGalleryStockAudioFile extends IMediaGalleryStockFile {
+  type: 'audio';
+  duration: string;
+  length?: string;
+  group?: string;
+  tag?: string;
+}
+
+type TMediaGalleryStockFilesResponse =
+  | {
+      success: true;
+      message: string;
+      data: {
+        images: IMediaGalleryStockImageFile[];
+        audios: IMediaGalleryStockAudioFile[];
+      };
+    }
+  | { success: false; message: string };
 
 interface IMediaGalleryLimits {
   maxUsage: number;
@@ -31,7 +66,7 @@ interface IMediaGalleryProps {
   filter: 'audio' | 'image';
 }
 
-const fileTypeMap = {
+const fileTypeMap: Dictionary<string> = {
   mp3: 'audio',
   wav: 'audio',
   ogg: 'audio',
@@ -41,10 +76,11 @@ const fileTypeMap = {
   jpeg: 'image',
   webm: 'image',
   svg: 'image',
+  mp4: 'video',
 };
 
 const DEFAULT_MAX_USAGE = 1024 * Math.pow(1024, 2);
-const DEFAULT_MAX_FILE_SIZE = 25 * Math.pow(1024, 2);
+const DEFAULT_MAX_FILE_SIZE = 50 * Math.pow(1024, 2);
 
 export class MediaGalleryService extends Service {
   @Inject() private userService: UserService;
@@ -56,27 +92,14 @@ export class MediaGalleryService extends Service {
     reject: () => void;
   }> = {};
 
-  private stockImages = stockImages.map(item => {
-    return {
-      ...item,
-      type: 'image',
-      isStock: true,
-      size: 0,
-    };
-  });
-
-  private stockSounds = stockSounds.map(item => {
-    return {
-      ...item,
-      type: 'audio',
-      isStock: true,
-      size: 0,
-    };
-  });
-
   async fetchGalleryInfo(): Promise<IMediaGalleryInfo> {
-    const [files, limits] = await Promise.all([this.fetchFiles(), this.fetchFileLimits()]);
-    const totalUsage = files.reduce(
+    const [uploads, limits, stockMedia] = await Promise.all([
+      this.fetchFiles(),
+      this.fetchFileLimits(),
+      this.fetchStockMedia(),
+    ]);
+    const files = uploads.concat(stockMedia.audios, stockMedia.images);
+    const totalUsage = uploads.reduce(
       (size: number, file: IMediaGalleryFile) => size + Number(file.size),
       0,
     );
@@ -103,10 +126,7 @@ export class MediaGalleryService extends Service {
     filePaths.forEach((path: string) => {
       const contents = fs.readFileSync(path);
       const name = path.split('\\').pop();
-      const ext = name
-        .toLowerCase()
-        .split('.')
-        .pop();
+      const ext = name.toLowerCase().split('.').pop();
       const file = new File([contents], name, { type: `${fileTypeMap[ext]}/${ext}` });
       formData.append('uploads[]', file);
     });
@@ -116,7 +136,7 @@ export class MediaGalleryService extends Service {
       method: 'POST',
     });
 
-    await fetch(req);
+    await jfetch(req);
     return this.fetchGalleryInfo();
   }
 
@@ -154,23 +174,49 @@ export class MediaGalleryService extends Service {
     return new Request(url, { ...options, headers });
   }
 
+  private async fetchStockMedia(): Promise<{
+    audios: Array<IMediaGalleryFile>;
+    images: Array<IMediaGalleryFile>;
+  }> {
+    const req = this.formRequest('api/v5/media/desktop/gallery/stock-media?alert_panels=true');
+    const data: TMediaGalleryStockFilesResponse = await jfetch(req);
+    if (data.success) {
+      return {
+        images: data.data.images.map(item => ({
+          href: item.href,
+          filename: item.filename,
+          type: 'image',
+          size: 0,
+          isStock: true,
+        })),
+        audios: data.data.audios.map(item => ({
+          href: item.href,
+          filename: item.filename,
+          type: 'audio',
+          size: 0,
+          isStock: true,
+        })),
+      };
+    }
+
+    console.error('Failed to fetch stock media', data.message);
+    return { images: [], audios: [] };
+  }
+
   private async fetchFiles(): Promise<IMediaGalleryFile[]> {
     const req = this.formRequest('api/v5/slobs/uploads');
-    const files: { href: string; size?: number }[] = await fetch(req).then(resp => resp.json());
+    const files: { href: string; size?: number }[] = await jfetch(req);
 
     const uploads = files.map(item => {
-      const fileName = decodeURIComponent(item.href.split(/[\\/]/).pop());
-      const ext = fileName
-        .toLowerCase()
-        .split('.')
-        .pop();
-      const type = fileTypeMap[ext];
+      const filename = decodeURIComponent(item.href.split(/[\\/]/).pop());
+      const ext = filename.toLowerCase().split('.').pop();
+      const type = fileTypeMap[ext] === 'video' ? 'image' : fileTypeMap[ext];
       const size = item.size || 0;
 
-      return { ...item, fileName, type, size, isStock: false };
+      return { ...item, filename, type, size, isStock: false };
     });
 
-    return uploads.concat(this.stockImages, this.stockSounds);
+    return uploads;
   }
 
   private async fetchFileLimits(): Promise<IMediaGalleryLimits> {
@@ -183,7 +229,7 @@ export class MediaGalleryService extends Service {
           maxFileSize: resp.body.max_allowed_upload_fize_size,
         };
       });
-    } catch (e) {
+    } catch (e: unknown) {
       return {
         maxUsage: DEFAULT_MAX_USAGE,
         maxFileSize: DEFAULT_MAX_FILE_SIZE,

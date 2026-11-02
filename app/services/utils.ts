@@ -1,19 +1,65 @@
 import URI from 'urijs';
 import isEqual from 'lodash/isEqual';
 import electron from 'electron';
+import cloneDeep from 'lodash/cloneDeep';
+import fs from 'fs';
+import path from 'path';
+import * as remote from '@electron/remote';
 
 export const enum EBit {
   ZERO,
   ONE,
 }
 
+export interface IEnv {
+  NODE_ENV: 'production' | 'development' | 'test';
+  SLOBS_PREVIEW: boolean;
+  SLOBS_IPC: boolean;
+  SLOBS_USE_LOCAL_HOST: boolean;
+  SLOBS_VERSION: string;
+  SLOBS_TRACE_SYNC_IPC: boolean;
+  SLOBS_USE_CDN_MEDIA: boolean;
+  SLD_USE_BETA: boolean;
+  SLD_TEST_GROUP: string;
+  // Allows joining as a guest instead of a host for guest cam
+  SLD_GUEST_CAM_HASH: string;
+  CI: boolean;
+  HIGHLIGHTER_ENV: 'production' | 'staging';
+  // Dev only: absolute path to a locally built Streamlabs Replay installer. When set, the Replay
+  // install flow runs that exe instead of downloading one from the CDN.
+  HIGHLIGHTER_LOCAL_SETUP_PATH?: string;
+  AVATAR_ENV?: 'production' | 'staging' | 'local';
+
+  // Development/testing variables
+  SLD_FORCE_PRODUCT_UPDATES?: boolean;
+  SLD_FORCE_ONBOARDING_STEP?: boolean | string;
+
+  // Test automation variables
+  SLD_TESTS_SKIP_ONBOARDING?: 'true';
+}
+
 export default class Utils {
-  static applyProxy(target: Object, source: Object) {
-    Object.keys(source).forEach(propName => {
+  /**
+   * cache env variables
+   * since electron.remote.process takes to much time to fetch
+   */
+  static _env: IEnv;
+  static get env() {
+    if (!Utils._env) Utils._env = remote.process.env as any;
+    return Utils._env;
+  }
+
+  static applyProxy(target: Object, source: Object | Function) {
+    // TODO: Figure out why this is happening
+    if (!source) return;
+
+    const sourceObj = typeof source === 'function' ? source() : source;
+
+    Object.keys(sourceObj).forEach(propName => {
       Object.defineProperty(target, propName, {
         configurable: true,
         get() {
-          return source[propName];
+          return sourceObj[propName];
         },
       });
     });
@@ -31,6 +77,10 @@ export default class Utils {
     return URI.parseQuery(URI.parse(url).query) as Dictionary<string>;
   }
 
+  static isWorkerWindow(): boolean {
+    return this.getWindowId() === 'worker';
+  }
+
   static isMainWindow(): boolean {
     return this.getWindowId() === 'main';
   }
@@ -39,20 +89,70 @@ export default class Utils {
     return this.getWindowId() === 'child';
   }
 
-  static isDevMode() {
-    return process.env.NODE_ENV !== 'production';
+  static isOneOffWindow(): boolean {
+    return !['worker', 'main', 'child'].includes(this.getWindowId());
+  }
+
+  static getMainWindow(): Electron.BrowserWindow {
+    return remote.BrowserWindow.getAllWindows().find(
+      win => Utils.getUrlParams(win.webContents.getURL()).windowId === 'main',
+    );
+  }
+
+  static getChildWindow(): Electron.BrowserWindow {
+    return remote.BrowserWindow.getAllWindows().find(
+      win => Utils.getUrlParams(win.webContents.getURL()).windowId === 'child',
+    );
+  }
+
+  static get isProduction() {
+    return Utils.env.NODE_ENV === 'production';
+  }
+
+  static isDevMode(): boolean {
+    return Utils.env.NODE_ENV !== 'production';
+  }
+
+  static getHighlighterEnvironment(): 'production' | 'staging' {
+    // need to use this remote thing because main process is being spawned as
+    // subprocess of updater process in the release build
+    if (remote.process.argv.includes('--bundle-qa')) {
+      return 'staging';
+    }
+
+    return process.env.HIGHLIGHTER_ENV === 'staging' ? 'staging' : 'production';
+  }
+
+  static getAvatarEnvironment(): 'production' | 'staging' | 'local' {
+    if (remote.process.argv.includes('--bundle-qa')) {
+      return 'staging';
+    }
+
+    if (process.env.AVATAR_ENV !== 'staging' && process.env.AVATAR_ENV !== 'local') {
+      return 'production';
+    }
+
+    return process.env.AVATAR_ENV as 'production' | 'staging' | 'local';
+  }
+
+  static isTestMode() {
+    return Utils.env.NODE_ENV === 'test';
   }
 
   static isPreview(): boolean {
-    return electron.remote.process.env.SLOBS_PREVIEW;
+    return Utils.env.SLOBS_PREVIEW as boolean;
   }
 
   static isIpc(): boolean {
-    return electron.remote.process.env.SLOBS_IPC;
+    return Utils.env.SLOBS_IPC as boolean;
   }
 
-  static useLocalHost(): boolean {
-    return electron.remote.process.env.SLOBS_USE_LOCAL_HOST;
+  static shouldUseLocalHost(): boolean {
+    return Utils.env.SLOBS_USE_LOCAL_HOST as boolean;
+  }
+
+  static shouldUseBeta(): boolean {
+    return (process.env.SLD_COMPILE_FOR_BETA || Utils.env.SLD_USE_BETA) as boolean;
   }
 
   /**
@@ -110,7 +210,9 @@ export default class Utils {
   static getChangedParams<T>(obj: T, patch: T): Partial<T> {
     const result: Dictionary<any> = {};
     Object.keys(patch).forEach(key => {
-      if (!isEqual(obj[key], patch[key])) result[key] = patch[key];
+      // TODO: index
+      // @ts-ignore
+      if (!isEqual(obj[key], patch[key])) result[key] = cloneDeep(patch[key]);
     });
     return result as Partial<T>;
   }
@@ -121,10 +223,18 @@ export default class Utils {
     if (obj == null) return patch;
 
     Object.keys(patch).forEach(key => {
+      // TODO: index
+      // @ts-ignore
       if (!isEqual(obj[key], patch[key])) {
+        // TODO: index
+        // @ts-ignore
         if (patch[key] && typeof patch[key] === 'object' && !Array.isArray(patch[key])) {
+          // TODO: index
+          // @ts-ignore
           result[key] = this.getDeepChangedParams(obj[key], patch[key]);
         } else {
+          // TODO: index
+          // @ts-ignore
           result[key] = patch[key];
         }
       }
@@ -153,5 +263,86 @@ export default class Utils {
         derivedCtor.prototype[name] = baseCtor.prototype[name];
       });
     });
+  }
+
+  /**
+   * Measure time in ms between events and print in to the main process stdout
+   * It's helpful for measuring the time between events in different windows
+   */
+  static measure(msg: string, timestamp?: number) {
+    electron.ipcRenderer.send('measure-time', msg, timestamp || Date.now());
+  }
+
+  static copyToClipboard(str: string) {
+    const el = document.createElement('textarea');
+    el.value = str;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+  }
+
+  static sleep(ms: number): Promise<void> {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  static getReadableFileSizeString(fileSizeInBytes: number): string {
+    let i = -1;
+    const byteUnits = [' kB', ' MB', ' GB', ' TB', 'PB', 'EB', 'ZB', 'YB'];
+    do {
+      fileSizeInBytes = fileSizeInBytes / 1024;
+      i++;
+    } while (fileSizeInBytes > 1024);
+    return Math.max(fileSizeInBytes, 0.1).toFixed(1) + byteUnits[i];
+  }
+
+  /**
+   * Returns a type predicate that makes prop from TObj a required property.
+   * This function is primarily meant to be used with `filter`
+   * @param prop The property to make required
+   * @example
+   * a.filter(propertyExists('foo')).forEach(v => v.foo + 5);
+   */
+  static propertyExists<TObj, TProp extends keyof TObj>(prop: TProp) {
+    return (obj: TObj): obj is Required<Pick<TObj, TProp>> & TObj => obj[prop] != null;
+  }
+}
+
+/**
+ * A typed version of Object.keys()
+ * Original Object.keys always returns a string[] type
+ * @see discussion here https://github.com/microsoft/TypeScript/pull/12253
+ */
+export function keys<T>(target: T) {
+  return Object.keys(target) as (keyof T)[];
+}
+
+let appPath: string;
+
+/**
+ * Memoized function for getting the app path
+ */
+export function getAppPath() {
+  appPath = appPath ?? remote.app.getAppPath();
+  return appPath;
+}
+
+/**
+ * A fallback-safe method of fetching images
+ * from either our local storage or the CDN
+ * @param mediaPath The path structure to retrieve the image from the media folders
+ */
+export function $i(mediaPath: string) {
+  try {
+    // Useful for testing media fetches properly from the CDN
+    if (Utils.env.SLOBS_USE_CDN_MEDIA) throw new Error('Using CDN');
+
+    const localMediaPath = require(`../../media/${mediaPath}`);
+
+    if (!fs.existsSync(path.resolve(getAppPath(), localMediaPath))) throw new Error('Using CDN');
+
+    return localMediaPath;
+  } catch (e: unknown) {
+    return `https://slobs-cdn.streamlabs.com/media/${mediaPath}`;
   }
 }
